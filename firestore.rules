@@ -1,0 +1,118 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Everything hangs off this: you must be signed in, the document must be
+    // your own uid, AND the address behind the account must be confirmed.
+    // There is no path to another person's data.
+    //
+    // email_verified is the enforcement point for verification, not the sign-in
+    // screen. A UI gate alone stops nothing — anyone can call the Firestore REST
+    // API directly with an unverified account's token. Google sign-in arrives
+    // with this already true; email/password accounts get it after confirming.
+    //
+    // Note: an ID token is minted at sign-in and keeps saying email_verified
+    // false until it is refreshed. The client force-refreshes the token the
+    // moment it detects confirmation, otherwise these rules would keep
+    // rejecting a user who has genuinely just confirmed.
+    function isOwner(userId) {
+      return request.auth != null
+          && request.auth.uid == userId
+          && request.auth.token.email_verified == true;
+    }
+
+    function validSchedule(sc) {
+      return sc is map
+          && sc.sessionsPerWeek is int
+          && sc.sessionsPerWeek >= 1 && sc.sessionsPerWeek <= 7
+          && sc.minutesPerSession is int
+          && sc.minutesPerSession >= 10 && sc.minutesPerSession <= 240;
+    }
+
+    function validGoal(g) {
+      return g is map
+          && g.type in ['endurance', 'fitness']
+          && g.deadline is string && g.deadline.size() == 10;
+    }
+
+    function validPlan(d) {
+      return d.name is string && d.name.size() > 0 && d.name.size() <= 60
+          && d.planStart is string && d.planStart.size() == 10
+          && d.profile is map
+          && validSchedule(d.schedule)
+          && validGoal(d.goal);
+    }
+
+    // The athlete's current fitness is DERIVED by the app from logged sessions
+    // and test results — it is never something a person types in. Pinning these
+    // four onboarding answers as immutable means the only way fitness can move
+    // is by actually training or actually testing. Editing the goal or the
+    // schedule cannot launder a new fitness level into the plan.
+    function fitnessAnswersUnchanged() {
+      return request.resource.data.profile.get('workoutsPerWeek', '')
+             == resource.data.profile.get('workoutsPerWeek', '')
+          && request.resource.data.profile.get('cardioPerWeek', '')
+             == resource.data.profile.get('cardioPerWeek', '')
+          && request.resource.data.profile.get('runDuration', '')
+             == resource.data.profile.get('runDuration', '')
+          && request.resource.data.profile.get('fiveKSeconds', 0)
+             == resource.data.profile.get('fiveKSeconds', 0);
+    }
+
+    // The stored fitness snapshot is a mirror of the derived value, kept so the
+    // backend holds a readable number. Bounded so it can't be used as scratch space.
+    function validFitness() {
+      return !('fitness' in request.resource.data.diff(resource.data).affectedKeys())
+          || (request.resource.data.fitness is map
+              && request.resource.data.fitness.vdot is number
+              && request.resource.data.fitness.vdot >= 15
+              && request.resource.data.fitness.vdot <= 80);
+    }
+
+    // planStart anchors every logged date to a week number. If it could move,
+    // the entire training history would silently re-index.
+    function planStartUnchanged() {
+      return request.resource.data.planStart == resource.data.planStart;
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+
+      // No enumeration, ever. The client never lists this collection.
+      allow list: if false;
+
+      allow create: if isOwner(userId)
+                    && validPlan(request.resource.data)
+                    && request.resource.data.logs.size() == 0
+                    && request.resource.data.tests.size() == 0;
+
+      // Editable: training log, test results, the derived fitness mirror, the
+      // goal, the schedule, injury focus (inside profile), and the change log.
+      // Not editable: planStart, name, and the four fitness answers above.
+      allow update: if isOwner(userId)
+                    && request.resource.data.diff(resource.data).affectedKeys()
+                         .hasOnly(['logs', 'tests', 'fitness', 'goal', 'schedule',
+                                   'scheduleHistory', 'profile', 'changeLog'])
+                    && planStartUnchanged()
+                    && fitnessAnswersUnchanged()
+                    && validGoal(request.resource.data.goal)
+                    && validSchedule(request.resource.data.schedule)
+                    && validFitness()
+                    && request.resource.data.logs.size() <= 500
+                    && request.resource.data.tests.size() <= 60
+                    // Guarded with an existence check: reading a field that
+                    // isn't there errors out and denies the whole write, which
+                    // would lock out any document created before these fields
+                    // existed. Bound them only when they are actually present.
+                    && (!('changeLog' in request.resource.data)
+                        || request.resource.data.changeLog.size() <= 200)
+                    && (!('scheduleHistory' in request.resource.data)
+                        || request.resource.data.scheduleHistory.size() <= 100);
+
+      // You can delete your own plan ("Start a new plan"). Nobody else can.
+      allow delete: if isOwner(userId);
+    }
+
+    // Anything not matched above is denied by default.
+  }
+}

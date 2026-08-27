@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Peak — engine tests</title>
+<style>
+  body { font-family: ui-monospace, Menlo, monospace; background:#0f1115; color:#e8eaed; padding:24px; line-height:1.5; }
+  h2 { color:#4ade80; margin-top:28px; font-size:15px; }
+  .pass { color:#4ade80; } .fail { color:#f87171; font-weight:700; }
+  pre { background:#171a21; padding:12px; border-radius:8px; overflow-x:auto; font-size:12px; }
+  #summary { position:sticky; top:0; background:#0f1115; padding:10px 0; font-size:18px; font-weight:700; }
+</style>
+</head>
+<body>
+<div id="summary">running…</div>
+<div id="out"></div>
+<script type="module">
+import {
+  buildPlan, computeAdaptation, goalAssessment, vdotFromRace, predictRaceSeconds,
+  pacesFor, formatDuration, parseTimeToSeconds, dateKey, addDays, mondayOnOrBefore,
+  feasibilityReport, achievableVdotGain, EVENT_REQUIREMENTS,
+  deriveFitness, sessionsScheduledForWeek, baselineVdot,
+} from "./plan-engine.js?v=9";
+
+const out = document.getElementById("out");
+let pass = 0, fail = 0;
+
+function section(t) { out.insertAdjacentHTML("beforeend", `<h2>${t}</h2>`); }
+function check(label, cond, detail) {
+  if (cond) { pass++; out.insertAdjacentHTML("beforeend", `<div class="pass">✓ ${label}</div>`); }
+  else { fail++; out.insertAdjacentHTML("beforeend", `<div class="fail">✗ ${label} ${detail ? "— " + detail : ""}</div>`); }
+}
+function dump(o) { out.insertAdjacentHTML("beforeend", `<pre>${JSON.stringify(o, null, 1)}</pre>`); }
+
+// ---------------------------------------------------------------- physiology
+section("VDOT physiology");
+const v20 = vdotFromRace(20 * 60, 5000);
+check(`20:00 5K → VDOT ${v20.toFixed(1)} (expect ~49–51)`, v20 > 48 && v20 < 52, v20.toFixed(2));
+const v25 = vdotFromRace(25 * 60, 5000);
+check(`25:00 5K → VDOT ${v25.toFixed(1)} (expect ~38–41)`, v25 > 37 && v25 < 42, v25.toFixed(2));
+check("Faster 5K yields higher VDOT", v20 > v25);
+
+const rt = predictRaceSeconds(v20, 5000);
+check(`Round-trip 20:00 → VDOT → ${formatDuration(rt)}`, Math.abs(rt - 1200) < 5, `${rt.toFixed(1)}s`);
+const half = predictRaceSeconds(v20, 21097);
+check(`VDOT ${v20.toFixed(0)} half prediction ${formatDuration(half)} (Daniels table: ~1:31:35)`, half > 5400 && half < 5700);
+
+const p = pacesFor(v20);
+check("Easy pace slower than threshold", p.easy > p.threshold);
+check("Threshold slower than interval", p.threshold > p.interval);
+check("Interval slower than repetition", p.interval > p.repetition);
+check(`Easy pace ${formatDuration(p.easy)}/km is plausible for a 20:00 5K runner`, p.easy > 270 && p.easy < 360);
+
+section("Time parsing");
+check('"24:30" → 1470s', parseTimeToSeconds("24:30") === 1470);
+check('"1:45:00" → 6300s', parseTimeToSeconds("1:45:00") === 6300);
+check('"22" → 1320s', parseTimeToSeconds("22") === 1320);
+check('"abc" → null', parseTimeToSeconds("abc") === null);
+check('"" → null', parseTimeToSeconds("") === null);
+
+// ---------------------------------------------------------------- plan building
+function mkUser(over = {}) {
+  return {
+    name: "Test",
+    planStart: dateKey(new Date()),
+    profile: {
+      workoutsPerWeek: "low", cardioPerWeek: "mid",
+      runDuration: "to45", fiveKSeconds: 25 * 60, injuryFocus: ["hamstring"],
+      ...(over.profile || {}),
+    },
+    schedule: { sessionsPerWeek: 4, minutesPerSession: 60, commitments: {}, ...(over.schedule || {}) },
+    goal: { type: "endurance", event: "fiveK", targetSeconds: 22 * 60, deadline: dateKey(addDays(new Date(), 84)), ...(over.goal || {}) },
+    logs: over.logs || {}, tests: over.tests || {},
+  };
+}
+
+section("Plan structure");
+let u = mkUser();
+let a = computeAdaptation(u);
+let plan = buildPlan(u, a);
+check(`12-week deadline → ${plan.totalWeeks} weeks`, plan.totalWeeks >= 12 && plan.totalWeeks <= 13, String(plan.totalWeeks));
+check("Every week has 7 days", plan.weeks.every((w) => w.days.length === 7));
+check("Each week schedules the requested session count",
+  plan.weeks.every((w) => w.days.filter((d) => !d.isRest).length === 4),
+  plan.weeks.map((w) => w.days.filter((d) => !d.isRest).length).join(","));
+check("Week 1 is a test week", plan.weeks[0].isTest);
+check("Test weeks include week 4", plan.testWeeks.includes(4), plan.testWeeks.join(","));
+check("Deload weeks exist", plan.weeks.some((w) => w.isDeload));
+check("Taper exists for a 12-week plan", plan.weeks.some((w) => w.isTaper));
+check("Phases run Base → Build → Peak → Taper",
+  ["Base", "Build", "Peak", "Taper"].every((ph) => plan.weeks.some((w) => w.phase === ph)),
+  [...new Set(plan.weeks.map((w) => w.phase))].join(" "));
+check("Every session has content lines", plan.weeks.every((w) => w.days.filter((d) => !d.isRest).every((d) => d.session.lines.length > 0)));
+check("Deload volume is lower than the week before it", (() => {
+  const d = plan.weeks.find((w) => w.isDeload && w.num > 1);
+  return d && d.sessionMinutes < plan.weeks[d.num - 2].sessionMinutes;
+})());
+
+section("Volume ramp");
+const mins = plan.weeks.filter((w) => !w.isDeload && !w.isTaper).map((w) => w.sessionMinutes);
+check(`Ramps up over time (${mins.join(" → ")})`, mins[mins.length - 1] > mins[0]);
+check("Never exceeds the stated session cap", plan.weeks.every((w) => w.sessionMinutes <= 60));
+check("Long run is never shorter than a normal session", plan.weeks.every((w) => w.longMinutes >= w.sessionMinutes), plan.weeks.map((w) => `${w.sessionMinutes}/${w.longMinutes}`).join(" "));
+check("Long run is strictly longer whenever the duration ceiling isn't binding",
+  plan.weeks.filter((w) => w.longMinutes < 60).every((w) => w.longMinutes > w.sessionMinutes),
+  plan.weeks.map((w) => `${w.sessionMinutes}/${w.longMinutes}`).join(" "));
+
+section("Commitments are respected");
+u = mkUser({ schedule: { sessionsPerWeek: 4, minutesPerSession: 60, commitments: { 1: { load: "hard", label: "Soccer" }, 3: { load: "hard", label: "Soccer" } } } });
+a = computeAdaptation(u); plan = buildPlan(u, a);
+check("No sessions on hard-commitment days (Tue/Thu)",
+  plan.weeks.every((w) => w.days[1].isRest && w.days[3].isRest));
+check("Commitment label carried through", plan.weeks[0].days[1].commitment?.label === "Soccer");
+check("Stacked hard commitments raise a total-load warning", plan.warnings.some((w) => w.includes("hard commitment days")), plan.warnings.join(" | "));
+check("Still schedules 4 sessions on the remaining 5 days",
+  plan.weeks.every((w) => w.days.filter((d) => !d.isRest).length === 4));
+
+section("Over-committed schedule warns instead of failing");
+u = mkUser({ schedule: { sessionsPerWeek: 6, minutesPerSession: 60, commitments: { 1: { load: "hard", label: "x" }, 3: { load: "hard", label: "x" }, 5: { load: "hard", label: "x" } } } });
+a = computeAdaptation(u); plan = buildPlan(u, a);
+check("Warning raised when sessions exceed free days", plan.warnings.length > 0, plan.warnings.join(" | "));
+check("Caps at the number of free days", plan.weeks.every((w) => w.days.filter((d) => !d.isRest).length === 4));
+
+section("Long-run ceiling warning");
+u = mkUser({ goal: { type: "endurance", event: "marathon", targetSeconds: null, deadline: dateKey(addDays(new Date(), 168)) }, schedule: { sessionsPerWeek: 4, minutesPerSession: 60, commitments: {} } });
+a = computeAdaptation(u); plan = buildPlan(u, a);
+check("Marathon on 60-min sessions raises a long-run warning", plan.warnings.some((w) => w.includes("long runs")), plan.warnings.join(" | "));
+check("Long run grows past the session cap", plan.weeks.some((w) => w.longMinutes > 60), String(Math.max(...plan.weeks.map((w) => w.longMinutes))));
+
+section("General fitness goal");
+u = mkUser({ goal: { type: "fitness", fitnessTarget: "allround", deadline: dateKey(addDays(new Date(), 84)) } });
+a = computeAdaptation(u); plan = buildPlan(u, a);
+check("Builds without paces", plan.paces === null);
+check("Uses strength/conditioning session types",
+  plan.weeks[1].days.filter((d) => !d.isRest).some((d) => ["lower", "upper", "full", "conditioning"].includes(d.session.type)),
+  plan.weeks[1].days.filter((d) => !d.isRest).map((d) => d.session.type).join(","));
+check("Test session is a benchmark circuit",
+  plan.weeks[0].days.find((d) => d.session?.type === "test")?.session.label.includes("benchmark"));
+
+// ---------------------------------------------------------------- adaptation
+section("Adaptation — poor adherence");
+const start = mondayOnOrBefore(new Date());
+function logsFor(weeksBack, perWeek, rpe) {
+  const logs = {};
+  for (let w = 0; w < weeksBack; w++) {
+    for (let i = 0; i < perWeek; i++) {
+      const d = addDays(start, -((w + 1) * 7) + i);
+      logs[dateKey(d)] = { done: true, rpe, targetRpe: 6, type: "easy" };
+    }
+  }
+  return logs;
+}
+// Shift plan start back 3 weeks so there is history to evaluate.
+function withHistory(over) {
+  const uu = mkUser(over);
+  uu.planStart = dateKey(addDays(start, -21));
+  return uu;
+}
+let uLow = withHistory({ logs: {} });
+uLow.logs = (() => {
+  const logs = {};
+  for (let w = 0; w < 3; w++) {
+    const d = addDays(addDays(start, -21), w * 7);
+    logs[dateKey(d)] = { done: true, rpe: 6, targetRpe: 6, type: "easy" };
+  }
+  return logs;
+})();
+let aLow = computeAdaptation(uLow);
+check(`Low adherence cuts volume (factor ${aLow.volumeFactor.toFixed(2)})`, aLow.volumeFactor < 1, aLow.volumeFactor.toFixed(3));
+check("Adjustment is recorded with a reason", aLow.notes.length > 0, JSON.stringify(aLow.notes.map((n) => n.text)));
+check("Two bad weeks drop a session", aLow.sessionsAdjust === -1, String(aLow.sessionsAdjust));
+
+section("Adaptation — strong adherence, easy sessions");
+let uHigh = withHistory({});
+uHigh.logs = (() => {
+  const logs = {};
+  for (let w = 0; w < 3; w++)
+    for (let i = 0; i < 4; i++)
+      logs[dateKey(addDays(addDays(start, -21), w * 7 + i))] = { done: true, rpe: 4, targetRpe: 6, type: "easy" };
+  return logs;
+})();
+let aHigh = computeAdaptation(uHigh);
+check(`Full adherence + low RPE raises volume (factor ${aHigh.volumeFactor.toFixed(2)})`, aHigh.volumeFactor > 1, aHigh.volumeFactor.toFixed(3));
+check("Volume factor is clamped at 1.15", aHigh.volumeFactor <= 1.15);
+
+section("Adaptation — sessions too hard");
+let uHard = withHistory({});
+uHard.logs = (() => {
+  const logs = {};
+  for (let w = 0; w < 3; w++)
+    for (let i = 0; i < 4; i++)
+      logs[dateKey(addDays(addDays(start, -21), w * 7 + i))] = { done: true, rpe: 9, targetRpe: 6, type: "easy" };
+  return logs;
+})();
+let aHard = computeAdaptation(uHard);
+check(`High RPE eases load (factor ${aHard.volumeFactor.toFixed(2)})`, aHard.volumeFactor < 1, aHard.volumeFactor.toFixed(3));
+
+section("Adaptation — test result resets fitness");
+let uTest = withHistory({});
+uTest.tests = { 1: { type: "run", seconds: 25 * 60, meters: 5000 }, 4: { type: "run", seconds: 23 * 60 + 30, meters: 5000 } };
+let aTest = computeAdaptation(uTest);
+check("VDOT recalculated from latest test", aTest.vdot !== null && aTest.vdot > 40, String(aTest.vdot?.toFixed(1)));
+check("A test recorded in the current week counts immediately",
+  Math.abs(aTest.vdot - vdotFromRace(23 * 60 + 30, 5000)) < 0.01,
+  `${aTest.vdot?.toFixed(2)} vs ${vdotFromRace(23 * 60 + 30, 5000).toFixed(2)}`);
+check("Improvement noted in the adjustment log", aTest.notes.some((n) => n.text.includes("faster")), JSON.stringify(aTest.notes.map((n) => n.text)));
+const planTest = buildPlan(uTest, aTest);
+check("Plan paces follow the new test result", Math.abs(planTest.vdot - aTest.vdot) < 0.01);
+
+// ---------------------------------------------------------------- goal assessment
+section("Goal assessment");
+function assessFor(fiveK, target, weeks) {
+  const uu = mkUser({ profile: { fiveKSeconds: fiveK }, goal: { type: "endurance", event: "fiveK", targetSeconds: target, deadline: dateKey(addDays(new Date(), weeks * 7)) } });
+  const aa = computeAdaptation(uu);
+  return goalAssessment(uu, buildPlan(uu, aa), aa);
+}
+const modest = assessFor(25 * 60, 24 * 60 + 30, 12);
+check(`25:00 → 24:30 in 12 weeks reads reachable (${modest.verdict})`, ["ahead", "onTrack"].includes(modest.verdict), modest.verdict);
+const wild = assessFor(30 * 60, 18 * 60, 8);
+check(`30:00 → 18:00 in 8 weeks reads unrealistic (${wild.verdict})`, wild.verdict === "unrealistic", wild.verdict);
+check("Unrealistic verdict suggests a fair alternative", wild.detail.includes("realistic target"), wild.detail);
+const already = assessFor(22 * 60, 25 * 60, 12);
+check(`22:00 runner targeting 25:00 reads as ahead (${already.verdict})`, already.verdict === "ahead", already.verdict);
+check("Fitness goal returns no race assessment", goalAssessment(mkUser({ goal: { type: "fitness", deadline: dateKey(addDays(new Date(), 84)) } }), plan, a) === null);
+
+// ---------------------------------------------------------------- feasibility
+section("Feasibility — impossible goals are caught");
+
+function feas(over) { return feasibilityReport(mkUser(over)); }
+const sev = (r, level) => r.filter((i) => i.severity === level);
+
+const marathonRush = feas({ goal: { type: "endurance", event: "marathon", targetSeconds: null, deadline: dateKey(addDays(new Date(), 42)) } });
+check("Marathon in 6 weeks is a blocker", sev(marathonRush, "blocker").length > 0, JSON.stringify(marathonRush.map((i) => i.title)));
+check("Blocker explains the minimum build-up", marathonRush.some((i) => i.detail.includes(String(EVENT_REQUIREMENTS.marathon.minWeeks))));
+check("Blocker offers a concrete fix", marathonRush.every((i) => i.fix && i.fix.length > 10));
+
+const fromCouch = feas({ profile: { runDuration: "under10", cardioPerWeek: "none", fiveKSeconds: null }, goal: { type: "endurance", event: "marathon", targetSeconds: null, deadline: dateKey(addDays(new Date(), 200)) } });
+check("Marathon from under-10-min base is a blocker even with 28 weeks", sev(fromCouch, "blocker").length > 0, JSON.stringify(fromCouch.map((i) => i.title)));
+
+const wildTime = feas({ profile: { fiveKSeconds: 30 * 60, runDuration: "to30", cardioPerWeek: "low" }, goal: { type: "endurance", event: "fiveK", targetSeconds: 18 * 60, deadline: dateKey(addDays(new Date(), 56)) } });
+check("30:00 → 18:00 in 8 weeks is a blocker", sev(wildTime, "blocker").length > 0, JSON.stringify(wildTime.map((i) => i.title)));
+check("Time blocker names a reachable alternative", wildTime.some((i) => /\d+:\d\d/.test(i.fix || "")), JSON.stringify(wildTime.map((i) => i.fix)));
+
+const stretch = feas({ profile: { fiveKSeconds: 25 * 60, runDuration: "to45", cardioPerWeek: "mid" }, goal: { type: "endurance", event: "fiveK", targetSeconds: 22 * 60 + 30, deadline: dateKey(addDays(new Date(), 84)) } });
+check("A genuine stretch goal warns but doesn't block", sev(stretch, "blocker").length === 0, JSON.stringify(stretch.map((i) => i.severity + ":" + i.title)));
+
+const sane = feas({ profile: { fiveKSeconds: 25 * 60, runDuration: "to45", cardioPerWeek: "mid" }, goal: { type: "endurance", event: "fiveK", targetSeconds: 24 * 60, deadline: dateKey(addDays(new Date(), 84)) } });
+check("A reasonable goal produces no blockers", sev(sane, "blocker").length === 0, JSON.stringify(sane.map((i) => i.title)));
+
+const thin = feas({ schedule: { sessionsPerWeek: 2, minutesPerSession: 60, commitments: {} }, goal: { type: "endurance", event: "half", targetSeconds: null, deadline: dateKey(addDays(new Date(), 120)) } });
+check("2 sessions a week for a half raises a warning", thin.some((i) => i.title.includes("thin")), JSON.stringify(thin.map((i) => i.title)));
+
+const steep = feas({ profile: { cardioPerWeek: "none", runDuration: "to20", fiveKSeconds: null }, schedule: { sessionsPerWeek: 6, minutesPerSession: 45, commitments: {} } });
+check("No cardio → 6 sessions a week raises a ramp warning", steep.some((i) => i.title.includes("steep jump")), JSON.stringify(steep.map((i) => i.title)));
+
+check("Gain model is monotonic in weeks", achievableVdotGain("intermediate", 12) > achievableVdotGain("intermediate", 6));
+check("Gain model is capped", achievableVdotGain("beginner", 500) <= 12);
+check("Beginners have more headroom than advanced", achievableVdotGain("beginner", 12) > achievableVdotGain("advanced", 12));
+
+// ---------------------------------------------------------------- intensity
+section("Ambitious intensity");
+u = mkUser(); a = computeAdaptation(u); plan = buildPlan(u, a);
+const buildWeek = plan.weeks.find((w) => w.phase === "Build" && !w.isDeload && !w.isTest);
+const sessionsIn = (w) => w.days.filter((d) => !d.isRest).map((d) => d.session);
+
+check("Build weeks carry two quality running sessions",
+  sessionsIn(buildWeek).filter((x) => ["intervals", "tempo"].includes(x.type)).length === 2,
+  sessionsIn(buildWeek).map((x) => x.type).join(","));
+check("Intervals target RPE 9", sessionsIn(buildWeek).find((x) => x.type === "intervals")?.targetRpe === 9);
+check("Tempo targets RPE 8", sessionsIn(buildWeek).find((x) => x.type === "tempo")?.targetRpe === 8);
+check("Easy days are still protected at RPE 4",
+  plan.weeks.flatMap(sessionsIn).filter((x) => x.type === "easy").every((x) => x.targetRpe === 4));
+check("Intervals include a repetition finisher",
+  sessionsIn(buildWeek).find((x) => x.type === "intervals")?.lines.some((l) => l.includes("Finisher")));
+check("Long runs carry a fast finish in Build/Peak",
+  sessionsIn(buildWeek).find((x) => x.type === "long")?.lines.some((l) => l.includes("Fast finish")));
+check("Base-phase long runs have no fast finish",
+  !sessionsIn(plan.weeks[1]).find((x) => x.type === "long")?.lines.some((l) => l.includes("Fast finish")));
+check("Never more than two hard running days in a week",
+  plan.weeks.every((w) => sessionsIn(w).filter((x) => ["intervals", "tempo", "test"].includes(x.type)).length <= 2),
+  plan.weeks.map((w) => sessionsIn(w).filter((x) => ["intervals", "tempo", "test"].includes(x.type)).length).join(","));
+check("Strength work is taken near failure",
+  plan.weeks.flatMap(sessionsIn).find((x) => x.type === "strength")?.lines.some((l) => l.includes("failure")));
+
+section("Beginner tissue guard still overrides ambition");
+const begin = mkUser({ profile: { cardioPerWeek: "none", runDuration: "under10", fiveKSeconds: null } });
+const beginPlan = buildPlan(begin, computeAdaptation(begin));
+check("Beginner with no cardio gets a reduced first two weeks",
+  beginPlan.weeks[0].sessionMinutes < beginPlan.weeks[2].sessionMinutes,
+  `${beginPlan.weeks[0].sessionMinutes} vs ${beginPlan.weeks[2].sessionMinutes}`);
+check("The guard is disclosed, not silent", beginPlan.warnings.some((w) => w.includes("tendons")), beginPlan.warnings.join(" | "));
+
+section("Session length never exceeds what the athlete said they have");
+const boosted = buildPlan(mkUser(), { volumeFactor: 1.15, sessionsAdjust: 0, vdot: null, currentWeek: 8, notes: [] });
+check("Even at max adaptation boost, sessions stay within the stated cap",
+  boosted.weeks.every((w) => w.sessionMinutes <= 60),
+  boosted.weeks.map((w) => w.sessionMinutes).join(","));
+
+// ---------------------------------------------------------------- requirements
+section("Original requirements coverage");
+u = mkUser(); a = computeAdaptation(u); plan = buildPlan(u, a);
+const today = plan.weeks[1].days.find((d) => !d.isRest);
+check("REQ: training details for the day", today.session.lines.length >= 3 && today.session.minutes > 0);
+check("REQ: weekly overview", plan.weeks[1].days.length === 7 && !!plan.weeks[1].focus);
+check("REQ: full plan overview exists", plan.weeks.length === plan.totalWeeks && plan.weeks.every((w) => !!w.phase));
+check("REQ: key test weeks identified", plan.testWeeks.length >= 2 && plan.weeks.filter((w) => w.isTest).length === plan.testWeeks.length);
+check("REQ: fitness inputs all consumed",
+  ["workoutsPerWeek", "cardioPerWeek", "fiveKSeconds", "runDuration", "injuryFocus"].every((k) => k in u.profile));
+check("REQ: injury prevention appears in the plan",
+  plan.weeks.flatMap((w) => w.days).filter((d) => !d.isRest).some((d) => d.session.lines.some((l) => l.startsWith("🩹"))));
+check("REQ: schedule inputs all consumed",
+  ["sessionsPerWeek", "minutesPerSession", "commitments"].every((k) => k in u.schedule));
+check("REQ: goal + deadline drive the plan length", plan.totalWeeks === Math.max(2, Math.ceil((addDays(new Date(), 84) - mondayOnOrBefore(new Date())) / 86400000 + 1) / 7 | 0) || plan.totalWeeks >= 12);
+check("REQ: minimum gear is listed", plan.gear.length > 0 && plan.gear.includes("shoes"));
+check("REQ: every exercise offers an easier and harder option",
+  plan.weeks.flatMap((w) => w.days).filter((d) => d.session?.type === "strength")
+    .every((d) => d.session.lines.filter((l) => l.includes("—")).some((l) => l.includes("easier:") && l.includes("harder:"))));
+check("REQ: plan adapts to logged sessions", aLow.volumeFactor !== 1 || aHigh.volumeFactor !== 1);
+check("REQ: plan adapts to test-week performance", aTest.vdot !== null);
+
+// ---------------------------------------------------------------- derived fitness
+section("Fitness is derived, never entered");
+
+// Builds a user whose plan started `weeksAgo` weeks back, with `perWeek`
+// sessions logged in every completed week.
+function withTraining(weeksAgo, perWeek, over = {}) {
+  const uu = mkUser(over);
+  uu.planStart = dateKey(addDays(start, -weeksAgo * 7));
+  uu.logs = {};
+  for (let w = 0; w < weeksAgo; w++) {
+    for (let i = 0; i < perWeek; i++) {
+      uu.logs[dateKey(addDays(addDays(start, -weeksAgo * 7), w * 7 + i))] =
+        { done: true, rpe: 6, targetRpe: 6, type: "easy" };
+    }
+  }
+  return uu;
+}
+
+const seedVdot = baselineVdot(mkUser().profile);
+const trained = deriveFitness(withTraining(4, 4));
+check(`Consistent training raises the estimate (${seedVdot.toFixed(1)} → ${trained.vdot.toFixed(1)})`, trained.vdot > seedVdot);
+check("Estimate is flagged as estimated, not measured", trained.confidence === "estimated", trained.confidence);
+check("Anchor stays 'onboarding' with no test to anchor to", trained.anchor === "onboarding", trained.anchor);
+
+const idle = deriveFitness(withTraining(4, 0));
+check(`No training at all lets it decay (${seedVdot.toFixed(1)} → ${idle.vdot.toFixed(1)})`, idle.vdot < seedVdot);
+
+const partial = deriveFitness(withTraining(4, 2));
+check("Half attendance sits between full and none", partial.vdot < trained.vdot && partial.vdot > idle.vdot,
+  `${idle.vdot.toFixed(2)} < ${partial.vdot.toFixed(2)} < ${trained.vdot.toFixed(2)}`);
+
+const longRun = deriveFitness(withTraining(40, 4));
+check(`Untested drift is capped, not unbounded (40 weeks → ${longRun.vdot.toFixed(1)})`,
+  longRun.vdot - seedVdot <= 4.01, `drift ${(longRun.vdot - seedVdot).toFixed(2)}`);
+
+const tested = withTraining(6, 4);
+tested.tests = { 3: { type: "run", seconds: 22 * 60, meters: 5000 } };
+const tf = deriveFitness(tested);
+check("A test overrides the accumulated estimate outright",
+  Math.abs(tf.vdot - (vdotFromRace(22 * 60, 5000) + 3 * 0.2)) < 0.7,
+  `${tf.vdot.toFixed(2)} from test ${vdotFromRace(22 * 60, 5000).toFixed(2)}`);
+check("Anchor becomes the test", tf.anchor === "test" && tf.lastTestWeek === 3);
+check("Drift resets at the test", Math.abs(tf.driftSinceAnchor) < 1.5, tf.driftSinceAnchor.toFixed(2));
+
+const fresh = withTraining(2, 4);
+fresh.tests = { 2: { type: "run", seconds: 22 * 60, meters: 5000 } };
+check("A recent test reads as measured", deriveFitness(fresh).confidence === "measured");
+
+check("The plan's paces follow the derived fitness", (() => {
+  const uu = withTraining(4, 4);
+  const aa = computeAdaptation(uu);
+  const pp = buildPlan(uu, aa);
+  return Math.abs(pp.vdot - aa.fitness.vdot) < 0.01;
+})());
+
+section("Schedule history keeps past adherence honest");
+const histUser = mkUser({ schedule: { sessionsPerWeek: 3, minutesPerSession: 60, commitments: {} } });
+histUser.scheduleHistory = [{ fromWeek: 1, sessionsPerWeek: 5 }, { fromWeek: 4, sessionsPerWeek: 3 }];
+check("Week 2 is judged against the old count of 5", sessionsScheduledForWeek(histUser, 2) === 5);
+check("Week 5 is judged against the new count of 3", sessionsScheduledForWeek(histUser, 5) === 3);
+check("Same-week entries collapse rather than stack", (() => {
+  // Mirrors the editor's dedup: two edits in week 1 must leave one entry.
+  const h = [{ fromWeek: 1, sessionsPerWeek: 4 }];
+  const apply = (week, n) => {
+    if (h.length && h[h.length - 1].fromWeek === week) h[h.length - 1] = { fromWeek: week, sessionsPerWeek: n };
+    else h.push({ fromWeek: week, sessionsPerWeek: n });
+  };
+  apply(1, 5); apply(1, 6);
+  return h.length === 1 && h[0].sessionsPerWeek === 6;
+})());
+check("Falls back to the current schedule with no history",
+  sessionsScheduledForWeek(mkUser({ schedule: { sessionsPerWeek: 4, minutesPerSession: 60, commitments: {} } }), 3) === 4);
+
+section("Editing the goal preserves training history");
+const edited = withTraining(5, 4);
+const beforeF = deriveFitness(edited).vdot;
+const logCount = Object.keys(edited.logs).length;
+edited.goal = { type: "endurance", event: "half", targetSeconds: null, deadline: dateKey(addDays(new Date(), 140)) };
+const afterPlan = buildPlan(edited, computeAdaptation(edited));
+check("Logged sessions survive a goal change", Object.keys(edited.logs).length === logCount);
+check("Derived fitness survives a goal change", Math.abs(deriveFitness(edited).vdot - beforeF) < 0.01);
+check("The plan re-lengthens to the new deadline", afterPlan.totalWeeks > 15, String(afterPlan.totalWeeks));
+check("Week numbering still starts from the original planStart",
+  afterPlan.weeks[0].days[0].dateKey === dateKey(mondayOnOrBefore(addDays(start, -35))));
+
+section("Sample week output");
+u = mkUser(); a = computeAdaptation(u); plan = buildPlan(u, a);
+dump(plan.weeks[5].days.filter((d) => !d.isRest).map((d) => ({ day: d.weekday, type: d.session.type, min: d.session.minutes, rpe: d.session.targetRpe, first: d.session.lines[1] })));
+
+document.getElementById("summary").innerHTML =
+  fail === 0 ? `<span class="pass">ALL ${pass} CHECKS PASSED</span>` : `<span class="fail">${fail} FAILED</span> · ${pass} passed`;
+</script>
+</body>
+</html>

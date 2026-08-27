@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="theme-color" content="#0f1115" />
+<meta name="referrer" content="strict-origin-when-cross-origin" />
+<!-- Locks the page down to its own origin plus the exact Google endpoints
+     Firebase Auth and Firestore need. 'unsafe-inline' is allowed for STYLE only
+     (inline style attributes); scripts stay restricted, which is what actually
+     matters for XSS. -->
+<meta http-equiv="Content-Security-Policy" content="
+  default-src 'self';
+  script-src 'self' https://www.gstatic.com https://apis.google.com;
+  style-src 'self' 'unsafe-inline';
+  img-src 'self' data: https://*.googleusercontent.com;
+  connect-src 'self' https://*.googleapis.com https://*.firebaseapp.com https://securetoken.googleapis.com https://identitytoolkit.googleapis.com;
+  frame-src https://*.firebaseapp.com https://accounts.google.com;
+  base-uri 'self';
+  form-action 'self';
+  object-src 'none';
+" />
+<!-- frame-ancestors can only be delivered as an HTTP header, not a meta tag, so
+     it is not set here. On GitHub Pages you cannot set headers at all; if
+     clickjacking protection matters, host behind something that can send
+     Content-Security-Policy and X-Frame-Options (Netlify, Cloudflare, nginx). -->
+<title>Peak — Your Training Plan</title>
+<!-- Cache-busting: bump ?v= here and in app.js's imports on every deploy that
+     changes style.css, app.js, plan-engine.js, or workouts.js. Without it,
+     phones keep serving stale copies for a long time after a push. -->
+<link rel="stylesheet" href="style.css?v=9" />
+</head>
+<body>
+<div class="app">
+
+  <!-- SIGN IN — blocks everything until authenticated -->
+  <section id="view-auth" class="view"></section>
+
+  <!-- EMAIL VERIFICATION — blocks the app until the address is proven -->
+  <section id="view-verify" class="view"></section>
+
+  <!-- ONBOARDING — blocks the app until a plan exists -->
+  <section id="view-onboard" class="view"></section>
+
+  <div id="main-app" class="hidden">
+
+    <header class="app-header">
+      <p class="eyebrow">Peak</p>
+    </header>
+
+    <div id="demo-banner" class="demo-banner hidden">
+      Demo mode — everything is stored in this browser only. Remove <code>?demo=1</code> once Firebase is set up.
+    </div>
+
+    <nav class="tabs">
+      <button class="tab-btn active" data-tab="today">Today</button>
+      <button class="tab-btn" data-tab="week">Week</button>
+      <button class="tab-btn" data-tab="plan">Plan</button>
+      <button class="tab-btn" data-tab="profile">Profile</button>
+    </nav>
+
+    <section id="view-today" class="view active">
+      <div id="today-content"></div>
+    </section>
+
+    <section id="view-week" class="view">
+      <div class="card week-nav">
+        <button id="week-prev" class="week-nav-btn" aria-label="Previous week">‹</button>
+        <div class="week-nav-mid">
+          <div class="week-nav-title" id="week-title">Week 1</div>
+          <div class="week-nav-sub" id="week-subtitle"></div>
+        </div>
+        <button id="week-next" class="week-nav-btn" aria-label="Next week">›</button>
+      </div>
+      <div id="week-days"></div>
+    </section>
+
+    <section id="view-plan" class="view">
+      <div id="plan-content"></div>
+    </section>
+
+    <section id="view-profile" class="view">
+      <div id="profile-content"></div>
+    </section>
+
+  </div>
+
+  <div id="modal-root"></div>
+</div>
+
+<script type="module" src="app.js?v=9"></script>
+</body>
+</html>
