@@ -2,7 +2,7 @@
 // Cache-busting: bump ?v= here and in index.html on every deploy that changes
 // app.js, plan-engine.js, workouts.js, or style.css.
 
-import { firebaseConfig } from "./firebase-config.js?v=15";
+import { firebaseConfig } from "./firebase-config.js?v=21";
 import {
   WORKOUT_FREQ, CARDIO_FREQ, RUN_DURATION, INJURY_FOCUS_LABELS,
   WEEKDAYS, WEEKDAYS_SHORT, COMMITMENT_LOADS, SESSION_COUNTS, SESSION_MINUTES,
@@ -11,9 +11,9 @@ import {
   formatDuration, formatPace, paceToMile, parseTimeToSeconds,
   buildPlan, getWeek, getDayForDate, computeAdaptation, goalAssessment,
   feasibilityReport, deriveFitness, pruneCoachOverrides,
-} from "./plan-engine.js?v=15";
-import { RPE_SCALE, GEAR_LABELS } from "./workouts.js?v=15";
-import { coachRespond } from "./coach.js?v=15";
+} from "./plan-engine.js?v=21";
+import { RPE_SCALE, GEAR_LABELS } from "./workouts.js?v=21";
+import { coachRespond } from "./coach.js?v=21";
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
@@ -941,7 +941,20 @@ function renderToday() {
     return;
   }
 
-  c.innerHTML = sessionCardHtml(day, week, { showLog: true }) + rpeGuideHtml() + weekGlanceHtml(week);
+  const extraHtml = day.extraSession
+    ? `<div class="card session-card">
+         <div class="session-head">
+           <span class="badge badge-soft">Also today</span>
+           <span class="badge badge-test">Added by coach</span>
+         </div>
+         <h2>${escapeHtml(day.extraSession.label)}</h2>
+         <div class="session-meta"><span>${day.extraSession.minutes} min</span><span>RPE ${day.extraSession.targetRpe}</span></div>
+         <ul class="workout-list">${day.extraSession.lines.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul>
+         <p class="hint" style="margin:16px 0 0;">Logging today covers both sessions.</p>
+       </div>`
+    : "";
+
+  c.innerHTML = sessionCardHtml(day, week, { showLog: true }) + extraHtml + rpeGuideHtml() + weekGlanceHtml(week);
   wireLogControls(day, week);
 }
 
@@ -1019,6 +1032,11 @@ function renderWeek() {
         <ul class="workout-list">
           ${d.session.lines.map((l) => `<li class="${l.startsWith("🩹") ? "extra" : ""}">${escapeHtml(l)}</li>`).join("")}
         </ul>
+        ${d.extraSession ? `
+          <div class="extra-session">
+            <div class="day-head"><span class="badge badge-soft">+ ${escapeHtml(d.extraSession.label)}</span></div>
+            <ul class="workout-list">${d.extraSession.lines.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul>
+          </div>` : ""}
         ${d.commitment ? `<p class="commit-note">Also today: ${escapeHtml(d.commitment.label)}</p>` : ""}
       </div>`;
   }).join("");
@@ -1586,6 +1604,20 @@ async function applyCoachActions(actions) {
       touchedOverrides = true;
     }
 
+    else if (a.type === "addRecurringSessions") {
+      const existing = co.extraSessions || [];
+      const added = a.weekdays
+        .filter((wd) => !existing.some((e) => e.weekday === wd))
+        .map((wd) => ({ weekday: wd, type: a.sessionType, fromWeek: adaptation.currentWeek }));
+      co.extraSessions = [...existing, ...added].slice(0, 7);
+      touchedOverrides = true;
+    }
+
+    else if (a.type === "removeRecurringSessions") {
+      co.extraSessions = (co.extraSessions || []).filter((e) => !a.weekdays.includes(e.weekday));
+      touchedOverrides = true;
+    }
+
     else if (a.type === "addInjuryFocus") {
       const list = [...new Set([...(user.profile.injuryFocus || []), a.part])].slice(0, 8);
       user.profile = { ...user.profile, injuryFocus: list };
@@ -1681,6 +1713,8 @@ async function sendToCoach() {
       if (a.type === "moveSession") changes.push("Session moved");
       if (a.type === "setLoad") changes.push(`Load ${Math.round(a.factor * 100)}%`);
       if (a.type === "softenDays") changes.push("Impact removed");
+      if (a.type === "addRecurringSessions") changes.push(`+${a.weekdays.length} weekly session${a.weekdays.length === 1 ? "" : "s"}`);
+      if (a.type === "removeRecurringSessions") changes.push("Session removed");
       if (a.type === "addInjuryFocus") changes.push("Prehab added");
     }
 

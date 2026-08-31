@@ -79,7 +79,9 @@ service cloud.firestore {
                       && request.resource.data.coachOverrides.loadFactor >= 0.5
                       && request.resource.data.coachOverrides.loadFactor <= 1.5))
               && (!('blockedDates' in request.resource.data.coachOverrides)
-                  || request.resource.data.coachOverrides.blockedDates.size() <= 200));
+                  || request.resource.data.coachOverrides.blockedDates.size() <= 200)
+              && (!('extraSessions' in request.resource.data.coachOverrides)
+                  || request.resource.data.coachOverrides.extraSessions.size() <= 7));
     }
 
     // planStart anchors every logged date to a week number. If it could move,

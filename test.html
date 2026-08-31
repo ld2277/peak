@@ -31,8 +31,8 @@ import {
   feasibilityReport, achievableVdotGain, EVENT_REQUIREMENTS,
   deriveFitness, sessionsScheduledForWeek, baselineVdot, parseDateKey,
   pruneCoachOverrides,
-} from "./plan-engine.js?v=15";
-import { coachRespond } from "./coach.js?v=15";
+} from "./plan-engine.js?v=21";
+import { coachRespond } from "./coach.js?v=21";
 
 const out = document.getElementById("out");
 let pass = 0, fail = 0;
@@ -639,6 +639,90 @@ if (bSess && bRest) {
 check("Every generated session still has a label, duration and effort",
   basePlan.weeks.flatMap((w) => w.days).filter((d) => d.session)
     .every((d) => d.session.label && d.session.minutes > 0 && d.session.targetRpe >= 1));
+
+section("Coach — the two cases that failed in the wild");
+
+// 1. "tennis for 1 hour AND a 50 min run" previously logged one 60 min run:
+//    the first duration in the sentence won and the second session vanished.
+const rMulti = say("I played tennis today for 1 hour and went on 50min run at 5.41 min/km pace");
+const mSess = rMulti.actions.find((a) => a.type === "logActual")?.session;
+check("Two activities in one message are both captured", !!mSess && mSess.minutes === 110,
+  mSess ? `${mSess.minutes} min (expected 110)` : `no log (intent ${rMulti.intent})`);
+check("The description names both sessions by name", !!mSess && /tennis/i.test(mSess.label) && /run/i.test(mSess.label),
+  mSess?.label);
+check("A pace is not mistaken for a duration", !!mSess && mSess.minutes !== 41 && mSess.minutes !== 60,
+  `${mSess?.minutes} min`);
+check("The run is what counts against a planned run", !!mSess && mSess.type === "run", mSess?.type);
+check("The pace is read and commented on", /min\/km|\/km/.test(rMulti.reply), rMulti.reply.slice(-160));
+
+// 2. "add 2 strength sessions on Tuesdays and Thursdays" was not understood at
+//    all — the coach had no way to add sessions.
+const rAdd = say("Please adjust and add 2 strength sessions (focus upper body with pull-ups and weights): one on Tuesdays and one on Thursdays");
+check("Adding standing sessions is understood", rAdd.intent === "addSession", rAdd.intent);
+const addAct = rAdd.actions.find((a) => a.type === "addRecurringSessions");
+check("It produces an add action", !!addAct, JSON.stringify(rAdd.actions.map((a) => a.type)));
+check("Upper body is recognised as the focus", addAct?.sessionType === "upper", addAct?.sessionType);
+check("Both requested days are picked up",
+  !addAct || (addAct.weekdays.includes(1) || addAct.weekdays.includes(3)),
+  JSON.stringify(addAct?.weekdays));
+check("It explains what it did", /upper-body strength/i.test(rAdd.reply), rAdd.reply.slice(0, 140));
+
+// The engine must actually place them.
+const extraUser = mkUser({ schedule: { sessionsPerWeek: 4, minutesPerSession: 60, commitments: {} } });
+extraUser.planStart = dateKey(monday);
+extraUser.coachOverrides = { extraSessions: [{ weekday: 1, type: "upper", fromWeek: 1 }, { weekday: 3, type: "upper", fromWeek: 1 }] };
+const extraPlan = buildPlan(extraUser, computeAdaptation(extraUser));
+// Week 1 is a test week, so one of the two requested days is deliberately left
+// clear. Check a normal week for full placement, and the test week separately.
+const normalWeek = extraPlan.weeks.find((w) => !w.isTest) || extraPlan.weeks[1];
+const addedDays = normalWeek.days.filter((d) => d.addedByCoach);
+check("Added sessions appear on both requested days in a normal week",
+  addedDays.length === 2, `${addedDays.length} added in week ${normalWeek.num}`);
+check("A test week gets one fewer, because the time-trial day stays clear",
+  extraPlan.weeks[0].days.filter((d) => d.addedByCoach).length === 1,
+  `${extraPlan.weeks[0].days.filter((d) => d.addedByCoach).length} added in week 1`);
+const addedSessions = addedDays.map((d) => d.session?.type === "upper" ? d.session : d.extraSession);
+check("Added sessions are the requested type",
+  addedSessions.every((x) => x && x.type === "upper"), addedSessions.map((x) => x && x.type).join(","));
+check("Added sessions include pull-ups in the pool",
+  addedSessions.some((x) => x.lines.some((l) => /pull-up/i.test(l))));
+check("Adding never destroys the session that was already there",
+  extraPlan.weeks.flatMap((w) => w.days).filter((d) => d.extraSession).every((d) => !!d.session),
+  "a doubled-up day must keep both");
+check("Nothing is ever stacked onto a test day",
+  extraPlan.weeks.flatMap((w) => w.days).every((d) => !(d.session?.type === "test" && d.extraSession)),
+  "lifting around a max-effort time trial corrupts the result");
+check("A day never ends up with more than two sessions",
+  extraPlan.weeks.flatMap((w) => w.days).every((d) => !d.extraSession || (d.session && !d.extraSession.extraSession)));
+check("Adherence counts added sessions as scheduled",
+  sessionsScheduledForWeek(extraUser, 1) === 6, String(sessionsScheduledForWeek(extraUser, 1)));
+
+// Hard commitments must still win.
+const busyUser = mkUser({ schedule: { sessionsPerWeek: 4, minutesPerSession: 60, commitments: { 1: { load: "hard", label: "Soccer" } } } });
+busyUser.planStart = dateKey(monday);
+const rBusyAdd = coachRespond("add a strength session on Tuesdays", {
+  user: busyUser, plan: buildPlan(busyUser, computeAdaptation(busyUser)),
+  adaptation: computeAdaptation(busyUser), today: monday,
+});
+check("It refuses to add onto a hard commitment day",
+  !rBusyAdd.actions.some((a) => a.type === "addRecurringSessions" && a.weekdays.includes(1)),
+  JSON.stringify(rBusyAdd.actions));
+check("And says why", /hard commitment/i.test(rBusyAdd.reply), rBusyAdd.reply.slice(0, 160));
+
+// Removal.
+const remUser = mkUser();
+remUser.planStart = dateKey(monday);
+remUser.coachOverrides = { extraSessions: [{ weekday: 1, type: "upper", fromWeek: 1 }] };
+const rRem = coachRespond("remove the tuesday session", {
+  user: remUser, plan: buildPlan(remUser, computeAdaptation(remUser)),
+  adaptation: computeAdaptation(remUser), today: monday,
+});
+check("Standing sessions can be removed", rRem.actions.some((a) => a.type === "removeRecurringSessions"), rRem.intent);
+
+// "add a run on Tuesdays" mentions an activity but is a schedule request.
+check("An add request is not mistaken for a session report",
+  say("add an easy run on Wednesdays").intent === "addSession",
+  say("add an easy run on Wednesdays").intent);
 
 section("Sample week output");
 u = mkUser(); a = computeAdaptation(u); plan = buildPlan(u, a);

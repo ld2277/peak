@@ -589,3 +589,8 @@ input::placeholder, textarea::placeholder { color: var(--dim); }
   * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
   .spinner { animation-duration: 2s !important; }
 }
+
+.extra-session {
+  margin-top: 18px; padding-top: 18px; border-top: 1px dashed var(--line);
+}
+.extra-session .day-head { margin-bottom: 10px; }

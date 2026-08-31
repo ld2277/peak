@@ -122,6 +122,9 @@ which is why all of it is covered by tests.
 | "legs are wrecked" | Cuts volume, holds intensity, explains why that way round |
 | "felt great, too easy" | Raises volume, refuses to make your easy days harder |
 | "my knee hurts" | Removes impact for three days, adds knee prehab, tells you to see a physio |
+| "played tennis for an hour and did a 50 min run at 5:41/km" | Logs both sessions with their own durations, reads the pace, compares it to your easy pace |
+| "add 2 upper body sessions on Tuesdays and Thursdays" | Adds standing sessions every week, alongside existing work where that makes sense |
+| "remove the Tuesday session" | Takes it back out |
 | "what am I doing today?" | Answers from your actual plan |
 
 **It says when it hasn't understood**, and offers examples instead of guessing. A coach that
@@ -142,6 +145,8 @@ Two things it deliberately refuses to do, both from watching it get them wrong i
 - **It never converts a test to another modality.** A bike time trial can't calibrate running
   paces, and a time trial run injured gives a slow, unrepresentative number that would then
   reset every pace in your plan. It postpones the test and says why.
+- **It never puts anything on a test day.** Lifting around a max-effort time trial
+  corrupts the result, and that result recalibrates every pace in the plan.
 - **It never stacks two sessions on one day** when reshuffling. If there's no free day, the
   session is dropped and you're told, because doubling up is how a missed session becomes a
   missed fortnight.
@@ -222,7 +227,7 @@ python3 -m http.server 8000
 ```
 
 Open `http://localhost:8000/index.html?demo=1`. Open `/test.html` to run the engine suite
-(175 checks: VDOT math, plan structure, scheduling, volume ramp, intensity, every adaptation
+(197 checks: VDOT math, plan structure, scheduling, volume ramp, intensity, every adaptation
 rule, derived fitness, schedule history, feasibility, and coverage of every requirement).
 
 It must be served over HTTP — `file://` breaks ES module imports.
@@ -379,5 +384,5 @@ targets) lives in `plan-engine.js`.
 ## Cache-busting
 
 `index.html`, `app.js`, `plan-engine.js`, and `coach.js` carry `?v=` on their imports —
-currently `v=14`.
+currently `v=21`.
 Bump them on every deploy that touches CSS or JS, or phones will serve stale copies for days.

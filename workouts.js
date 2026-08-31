@@ -143,6 +143,7 @@ const STRENGTH_POOL = {
   upper: [
     { name: "Push-up", regress: "Hands on a step or wall", progress: "Feet elevated, or 3 sec down", gear: [] },
     { name: "Inverted row", regress: "Feet closer, more upright", progress: "Feet elevated", gear: ["bar"] },
+    { name: "Pull-up or chin-up", regress: "Band-assisted, or slow negatives from the top", progress: "Pause 2 sec at the top", gear: ["bar"] },
     { name: "Pike push-up", regress: "Hands elevated", progress: "Feet on a step", gear: [] },
     { name: "Band row or doorway row", regress: "Less band tension", progress: "Pause 2 sec at the squeeze", gear: ["band"] },
     { name: "Dip on a chair or step", regress: "Feet flat, knees bent", progress: "Legs straight, heels out", gear: ["step"] },
@@ -189,7 +190,11 @@ export function strengthBlock({ focus, tier, minutes, seed = 0 }) {
   if (focus === "lower") {
     chosen = [...pick(STRENGTH_POOL.lower, slots - 1, seed), ...pick(STRENGTH_POOL.core, 1, seed)];
   } else if (focus === "upper") {
-    chosen = [...pick(STRENGTH_POOL.upper, slots - 1, seed), ...pick(STRENGTH_POOL.core, 1, seed)];
+    // Always include a vertical pull. An upper session without one is
+    // incomplete, and it's the movement people ask for by name.
+    const pull = STRENGTH_POOL.upper.find((e) => /pull-up/i.test(e.name));
+    const rest = STRENGTH_POOL.upper.filter((e) => e !== pull);
+    chosen = [pull, ...pick(rest, Math.max(1, slots - 2), seed), ...pick(STRENGTH_POOL.core, 1, seed)];
   } else {
     const nLower = Math.ceil((slots - 1) / 2);
     chosen = [

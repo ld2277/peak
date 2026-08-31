@@ -5,7 +5,7 @@
 import {
   WARMUPS, COOLDOWNS, strengthBlock, conditioningBlock, prehabBlock,
   MOBILITY_FLOW, INJURY_FOCUS_LABELS,
-} from "./workouts.js?v=15";
+} from "./workouts.js?v=21";
 
 export { INJURY_FOCUS_LABELS };
 
@@ -524,7 +524,7 @@ function buildSession({ type, minutes, tier, phase, weekNum, weekInPhase, paces,
 
 const RUN_TYPES = new Set(["easy", "strides", "intervals", "tempo", "long", "test"]);
 
-function applyCoachOverrides(dayEntries, user) {
+function applyCoachOverrides(dayEntries, user, makeSession, weekNum) {
   const co = user.coachOverrides || {};
   const byKey = Object.fromEntries(dayEntries.map((d) => [d.dateKey, d]));
 
@@ -554,7 +554,30 @@ function applyCoachOverrides(dayEntries, user) {
     d.blocked = true;
   }
 
-  // 3. Impact removed while something hurts. Duration and effort are kept —
+  // 3. Standing sessions the athlete asked the coach to add. These sit on top
+  //     of the generated plan and only ever fill genuinely empty days — never
+  //     stacked onto existing work, never onto a hard commitment.
+  for (const extra of co.extraSessions || []) {
+    if (weekNum != null && (extra.fromWeek || 1) > weekNum) continue;
+    const d = dayEntries.find((x) => x.weekdayIndex === extra.weekday);
+    if (!d || d.blocked || !makeSession) continue;
+    if (d.commitment && d.commitment.load === "hard") continue;
+    if (d.isRest) {
+      d.session = makeSession(extra.type);
+      d.isRest = false;
+      d.addedByCoach = true;
+    } else if (!d.extraSession && d.session.type !== "test") {
+      // The day already has work. Strength and mobility sit alongside a run
+      // rather than replacing it — that is how doubles are actually trained.
+      // Test days are the exception: nothing goes near a max effort, because
+      // the result recalibrates every pace in the plan.
+      d.extraSession = makeSession(extra.type);
+      d.extraSession.addedByCoach = true;
+      d.addedByCoach = true;
+    }
+  }
+
+  // 4. Impact removed while something hurts. Duration and effort are kept —
   //    the stimulus is preserved, only the loading through the legs changes.
   if (co.softenUntil) {
     const until = parseDateKey(co.softenUntil);
@@ -752,7 +775,15 @@ export function buildPlan(user, adaptation) {
       dayEntries.push(entry);
     }
 
-    applyCoachOverrides(dayEntries, user);
+    applyCoachOverrides(
+      dayEntries,
+      user,
+      (type) => buildSession({
+        type, minutes: sessionMinutes, tier, phase, weekNum: w, weekInPhase,
+        paces, vdot, injuryFocus: profile.injuryFocus || [], goal, longMinutes: cappedLong,
+      }),
+      w
+    );
 
     weeks.push({
       num: w,
@@ -847,10 +878,16 @@ const MAX_UNTESTED_DRIFT = 4;
 // and adherence for past weeks must be judged against what was scheduled then.
 export function sessionsScheduledForWeek(user, weekNum) {
   const hist = user.scheduleHistory;
-  if (!Array.isArray(hist) || !hist.length) return user.schedule.sessionsPerWeek;
-  let val = hist[0].sessionsPerWeek;
-  for (const h of hist) if (h.fromWeek <= weekNum) val = h.sessionsPerWeek;
-  return val;
+  let val = user.schedule.sessionsPerWeek;
+  if (Array.isArray(hist) && hist.length) {
+    val = hist[0].sessionsPerWeek;
+    for (const h of hist) if (h.fromWeek <= weekNum) val = h.sessionsPerWeek;
+  }
+  // Sessions the coach added are real scheduled work — counting them keeps
+  // adherence honest instead of flattering.
+  const extras = (user.coachOverrides?.extraSessions || [])
+    .filter((e) => (e.fromWeek || 1) <= weekNum).length;
+  return val + extras;
 }
 
 export function deriveFitness(user) {
