@@ -1,0 +1,45 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Gap probe</title>
+<style>body{font-family:ui-monospace,Menlo,monospace;background:#0A0A0A;color:#eee;padding:20px;font-size:12px}
+h2{color:#D8FF00;margin:20px 0 6px}td{padding:3px 10px 3px 0;vertical-align:top;border-bottom:1px solid #222}
+.ok{color:#D8FF00}.bad{color:#FF4D4D}.meh{color:#FFB020}</style></head><body>
+<div id="out">running…</div>
+<script type="module">
+import { buildPlan, computeAdaptation, dateKey, mondayOnOrBefore } from "/plan-engine.js?v=25";
+import { coachRespond } from "/coach.js?v=25";
+const monday = mondayOnOrBefore(new Date());
+const user = { name:"T", planStart: dateKey(monday),
+  profile:{workoutsPerWeek:"low",cardioPerWeek:"mid",runDuration:"to45",fiveKSeconds:1530,injuryFocus:[]},
+  schedule:{sessionsPerWeek:4,minutesPerSession:60,commitments:{}},
+  goal:{type:"endurance",event:"tenK",targetSeconds:2880,deadline:dateKey(new Date(monday.getFullYear(),monday.getMonth()+3,monday.getDate()))},
+  logs:{},tests:{},coachOverrides:{} };
+const a = computeAdaptation(user); const plan = buildPlan(user, a);
+const ask = (m) => coachRespond(m, {user, plan, adaptation:a, today:monday});
+const G = {
+ "Illness and life load":["I've got a cold","I'm sick, fever since yesterday","I only slept 4 hours",
+   "work has been brutal this month","I'm really stressed out","big night out yesterday"],
+ "Races and events":["I've got a parkrun on Saturday","I signed up for a 10k in 3 weeks",
+   "my race got cancelled","what pace should I run the race at"],
+ "Results outside test weeks":["I ran a 5k PB today, 23:40","my watch says I did 10k in 51:20",
+   "am I getting fitter","how am I progressing"],
+ "Explaining the plan":["why am I doing intervals","what's the point of this session",
+   "why is my easy pace so slow","what's a deload week"],
+ "Environment and kit":["I only have a treadmill","I'm running on trails this week",
+   "it's 35 degrees out","no gym access this week"],
+ "Corrections and undo":["undo that","I logged that wrong","that was Tuesday not Monday",
+   "delete yesterday's log","actually ignore what I just said"],
+ "Absence":["I'm on holiday for two weeks","I'll be off for a month","just got back after 3 weeks off"],
+ "Safety-critical":["I felt dizzy and my chest was tight on the run","I fainted after training",
+   "I've been skipping meals to lose weight","should I take creatine","how many calories should I eat"],
+};
+let html="", miss=0, tot=0;
+for (const [g,list] of Object.entries(G)) {
+  html += `<h2>${g}</h2><table>`;
+  for (const m of list) { tot++; const r=ask(m);
+    const acts=(r.actions||[]).map(x=>x.type).join(",")||"—";
+    const bad=r.intent==="unknown"; if(bad) miss++;
+    const wrong = !bad && ["ease","push","unavailable","logActual","scheduleChange"].includes(r.intent);
+    html += `<tr><td class="${bad?'bad':wrong?'meh':'ok'}">${bad?'gap':wrong?'?':'ok'}</td><td>${m}</td><td>${r.intent}</td><td>${acts}</td></tr>`; }
+  html += "</table>";
+}
+document.getElementById("out").innerHTML = `<h2>${tot-miss}/${tot} reach some intent · ${miss} not understood</h2>`+html;
+</script></body></html>

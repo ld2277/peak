@@ -2,7 +2,7 @@
 // Cache-busting: bump ?v= here and in index.html on every deploy that changes
 // app.js, plan-engine.js, workouts.js, or style.css.
 
-import { firebaseConfig } from "./firebase-config.js?v=24";
+import { firebaseConfig } from "./firebase-config.js?v=25";
 import {
   WORKOUT_FREQ, CARDIO_FREQ, RUN_DURATION, INJURY_FOCUS_LABELS,
   WEEKDAYS, WEEKDAYS_SHORT, COMMITMENT_LOADS, SESSION_COUNTS, SESSION_MINUTES,
@@ -11,9 +11,9 @@ import {
   formatDuration, formatPace, paceToMile, parseTimeToSeconds,
   buildPlan, getWeek, getDayForDate, computeAdaptation, goalAssessment,
   feasibilityReport, deriveFitness, pruneCoachOverrides,
-} from "./plan-engine.js?v=24";
-import { RPE_SCALE, GEAR_LABELS } from "./workouts.js?v=24";
-import { coachRespond } from "./coach.js?v=24";
+} from "./plan-engine.js?v=25";
+import { RPE_SCALE, GEAR_LABELS } from "./workouts.js?v=25";
+import { coachRespond } from "./coach.js?v=25";
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
@@ -1618,6 +1618,17 @@ async function applyCoachActions(actions) {
       touchedOverrides = true;
     }
 
+    else if (a.type === "recordResult") {
+      // Stored alongside test results so the derived fitness picks it up —
+      // a measured maximal effort is exactly what a test week produces.
+      const week = adaptation.currentWeek;
+      const result = { type: "run", seconds: a.seconds, meters: a.meters, viaCoach: true, recordedAt: Date.now() };
+      user.tests = user.tests || {};
+      user.tests[week] = result;
+      await persistField(`tests.${week}`, result);
+      touchedLogs = true;
+    }
+
     else if (a.type === "setExerciseRules") {
       co.exerciseRules = a.rules;
       touchedOverrides = true;
@@ -1751,6 +1762,7 @@ async function sendToCoach() {
       if (a.type === "setExerciseRules") changes.push("Exercises updated");
       if (a.type === "swapDays") changes.push("Days swapped");
       if (a.type === "setSchedule") changes.push("Schedule updated");
+      if (a.type === "recordResult") changes.push("Fitness recalculated");
       if (a.type === "addInjuryFocus") changes.push("Prehab added");
     }
 

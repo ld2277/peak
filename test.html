@@ -31,8 +31,8 @@ import {
   feasibilityReport, achievableVdotGain, EVENT_REQUIREMENTS,
   deriveFitness, sessionsScheduledForWeek, baselineVdot, parseDateKey,
   pruneCoachOverrides,
-} from "./plan-engine.js?v=24";
-import { coachRespond } from "./coach.js?v=24";
+} from "./plan-engine.js?v=25";
+import { coachRespond } from "./coach.js?v=25";
 
 const out = document.getElementById("out");
 let pass = 0, fail = 0;
@@ -812,6 +812,50 @@ check("Completion reports log the prescribed session",
   say("finished today's workout").actions.some((a) => a.type === "logActual"));
 check("Naming a session logs that one",
   say("did the intervals").intent === "completed");
+
+section("Coach — safety boundaries");
+
+const rCardiac = say("I felt dizzy and my chest was tight on the run");
+check("Cardiac-type symptoms are not treated as an injury", rCardiac.intent === "urgentMedical", rCardiac.intent);
+check("They change NOTHING in the plan", rCardiac.actions.length === 0, JSON.stringify(rCardiac.actions));
+check("They send you to a doctor today", /urgent care|doctor|emergency/i.test(rCardiac.reply));
+check("Fainting is handled the same way", say("I fainted after training").intent === "urgentMedical");
+
+const rEat = say("I've been skipping meals to lose weight");
+check("A restriction disclosure is never read as a missed session", rEat.intent === "eatingConcern", rEat.intent);
+check("It reschedules nothing", rEat.actions.length === 0, JSON.stringify(rEat.actions.map((a) => a.type)));
+check("It points to real help", /dietitian|gp|helpline|beat|neda/i.test(rEat.reply));
+check("It gives no calorie or weight numbers", !/\b\d{3,4}\s*(kcal|calories)\b/i.test(rEat.reply));
+check("Wanting to lose weight alone is not escalated",
+  say("I want to lose weight").intent !== "eatingConcern", say("I want to lose weight").intent);
+
+check("Supplement questions are declined", say("should I take creatine").intent === "outOfScope");
+check("Calorie questions are declined", say("how many calories should I eat").intent === "outOfScope");
+check("Declining still points somewhere useful", /dietitian|doctor/i.test(say("should I take creatine").reply));
+
+section("Coach — explaining rather than acting");
+check("'why is my easy pace so slow' explains instead of raising load", (() => {
+  const r = say("why is my easy pace so slow");
+  return r.intent === "explain" && !r.actions.some((a) => a.type === "setLoad");
+})(), say("why is my easy pace so slow").intent);
+check("Interval rationale is explained", say("why am I doing intervals").intent === "explain");
+check("Deloads are explained", say("what's a deload week").intent === "explain");
+check("Explanations never change the plan",
+  ["why am I doing intervals", "what's a deload week", "why is my easy pace so slow"]
+    .every((m) => say(m).actions.length === 0));
+
+section("Coach — measured efforts recalibrate fitness");
+const rPB = say("I ran a 5k PB today, 23:40");
+const res = rPB.actions.find((a) => a.type === "recordResult");
+check("A PB is recorded as a result", !!res, JSON.stringify(rPB.actions.map((a) => a.type)));
+check("With the right distance and time", res && res.meters === 5000 && res.seconds === 1420,
+  res ? `${res.meters}m in ${res.seconds}s` : "none");
+check("And the reply says paces will move", /recalculates|fitness moves/i.test(rPB.reply));
+check("A steady training run is NOT treated as a test",
+  !say("my watch says I did 10k in 51:20").actions.some((a) => a.type === "recordResult"),
+  "an easy run must not reset training paces");
+check("A pace is never mistaken for a result time",
+  !say("ran 40 min at 5:41/km").actions.some((a) => a.type === "recordResult"));
 
 section("Sample week output");
 u = mkUser(); a = computeAdaptation(u); plan = buildPlan(u, a);

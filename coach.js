@@ -11,8 +11,8 @@
 
 import {
   dateKey, parseDateKey, addDays, weekdayIndex, WEEKDAYS, WEEKDAYS_SHORT,
-  formatDuration, formatPace, INJURY_FOCUS_LABELS,
-} from "./plan-engine.js?v=24";
+  formatDuration, formatPace, INJURY_FOCUS_LABELS, vdotFromRace,
+} from "./plan-engine.js?v=25";
 
 // ---------------------------------------------------------------- text utils
 
@@ -174,6 +174,20 @@ function detectSubstitution(t) {
   if (m) return { from: m[1].trim(), to: m[2].trim() };
   return null;
 }
+
+// A clock time like "23:40" or "1:51:20", with pace expressions removed first
+// so "5:41/km" can't be mistaken for a result.
+function detectClockTime(t) {
+  const m = stripPaces(t).match(/\b(\d{1,3}):(\d{2})(?::(\d{2}))?\b/);
+  if (!m) return null;
+  return m[3] ? (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]) : (+m[1]) * 60 + (+m[2]);
+}
+
+// Only a genuine maximal effort should reset training paces. A steady 8k in
+// 45 min is not a test, and treating it as one would prescribe paces the
+// athlete can't hold.
+const RACE_MARKERS = [" pb", " pr ", " personal best", " race", " raced", " racing",
+  " parkrun", " park run", " time trial", " all out", " all-out", " flat out", " went for it"];
 
 const BODY_PARTS = [
   { key: "knee", words: ["knee", "knees", "it band", "itb"] },
@@ -345,6 +359,30 @@ function freeDaysInWeek(plan, week, user, exclude = []) {
   return week.days.filter((d) => d.isRest && !d.commitment && !blocked.has(d.dateKey));
 }
 
+// Symptoms that are not training problems. Deliberately narrow so normal
+// training talk ("out of breath", "legs hurt") doesn't trip them.
+const URGENT_MEDICAL = [
+  " chest pain", " chest was tight", " chest tightness", " chest tight", " pain in my chest",
+  " chest pressure", " tightness in my chest", " fainted", " passed out", " blacked out",
+  " lost consciousness", " palpitations", " heart racing", " irregular heartbeat",
+  " heart was pounding", " numbness", " numb down", " slurred", " vision went",
+  " couldn't see", " severe headache", " worst headache",
+];
+
+// Disclosures about restriction or purging. A training app must not treat these
+// as a scheduling problem, and must not give numbers.
+const EATING_CONCERN = [
+  " skipping meals", " skip meals", " not eating", " barely eating", " stopped eating",
+  " starving myself", " starve myself", " restricting", " restrict my", " purge", " purging",
+  " throw up after", " throwing up after", " make myself sick", " bingeing", " binging",
+  " hate my body", " too fat to",
+];
+
+const NUTRITION_QUESTIONS = [
+  " creatine", " supplement", " protein powder", " how many calories", " what should i eat",
+  " macros", " carb load", " gels", " should i eat", " diet plan", " lose weight",
+];
+
 // ---------------------------------------------------------------- intents
 
 // Ordered by priority: pain is checked before anything else, because a plan
@@ -362,6 +400,38 @@ export function coachRespond(message, ctx) {
   const km = detectDistanceKm(t);
   const activity = detectActivity(t);
   const part = detectBodyPart(t);
+
+  // ---- 0a. Symptoms that need a doctor, not a training adjustment. Checked
+  //           before everything, and never changes the plan — quietly softening
+  //           next week's sessions would imply this is a training problem.
+  if (hasAny(t, URGENT_MEDICAL)) {
+    return {
+      intent: "urgentMedical",
+      reply: "Stop training and get this looked at today — urgent care or your doctor, and emergency services if it's happening now or comes back.\n\nChest symptoms, fainting, palpitations and numbness around exercise are not training problems, and I'm not going to treat them like one by shuffling your sessions. I haven't changed anything in your plan; it'll still be here.\n\nPlease don't train again until someone qualified has told you it's safe.",
+      actions: [],
+      severity: "urgent",
+    };
+  }
+
+  // ---- 0b. Restriction or purging. No plan change, no numbers, no advice
+  //           about eating — just a straight answer and a route to real help.
+  if (hasAny(t, EATING_CONCERN)) {
+    return {
+      intent: "eatingConcern",
+      reply: "Thank you for telling me. I'm not going to change your training over that, because it isn't a training problem and I'd be the wrong thing to fix it.\n\nWhat I can say plainly: under-eating doesn't make you faster. It costs you adaptation, bone density and your period if you have one, and the fatigue you feel is the first symptom, not the last.\n\nPlease talk to your GP or a sports dietitian — and if it feels bigger than food, Beat (beateatingdisorders.org.uk) and NEDA (nationaleatingdisorders.org) both have helplines. I'll keep the plan exactly as it is in the meantime.",
+      actions: [],
+      severity: "high",
+    };
+  }
+
+  // ---- 0c. Nutrition and supplements are outside what this app should answer.
+  if (hasAny(t, NUTRITION_QUESTIONS) && /\?|\bshould i\b|\bhow many\b|\bwhat\b/.test(t)) {
+    return {
+      intent: "outOfScope",
+      reply: "That's outside what I should be answering. I build training plans from your logged sessions — I've got no view of your body, your bloods or your history, and nutrition advice from something that can't see any of that is worth very little.\n\nA sports dietitian is the right person, and for anything supplement-related, your doctor. Ask me about the training and I'm on much firmer ground.",
+      actions: [],
+    };
+  }
 
   // ---- 1. Pain or injury. Safety first, plan second.
   if (hasAny(t, PAIN_WORDS)) {
@@ -457,6 +527,13 @@ export function coachRespond(message, ctx) {
   if (!exercises.length &&
       (hasAny(t, UNAVAILABLE_WORDS) || (dates.length && hasAny(t, [" can't", " cannot", " won't", " no "])))) {
     return unavailableResponse({ t, dates, plan, user, today, todayKey });
+  }
+
+  // ---- 5b. Explanations. Checked before the feel words, because "why is my
+  //           easy pace so slow" contains "easy" and used to RAISE the load.
+  if (/\bwhy\b|\bwhat's the point\b|\bwhat is the point\b|\bwhat's a\b|\bwhat is a\b|\bhow does\b/.test(t)) {
+    const ex = explainResponse({ t, plan, adaptation });
+    if (ex) return ex;
   }
 
   // ---- 6. Feeling wrecked / everything too hard.
@@ -832,6 +909,12 @@ function loggedDifferently({ t, dates, minutes, km, activity, plan, user, today,
     ? "run"
     : (types[0] || activity || "other");
 
+  // A measured maximal effort is worth as much as a test week — it should reset
+  // the paces, not just sit in the log.
+  const raceTime = detectClockTime(t);
+  const raceKm = pieces.find((x) => x.km)?.km || km;
+  const isRace = hasAny(t, RACE_MARKERS) && raceTime && raceKm && raceKm >= 1.5;
+
   const actions = [{
     type: "logActual",
     dateKey: key,
@@ -881,6 +964,18 @@ function loggedDifferently({ t, dates, minutes, km, activity, plan, user, today,
     reply += `\n\nCross-training counts for aerobic work, so that's a fair swap — it just doesn't load your legs the way running does. Fine occasionally, worth avoiding for the long run.`;
   } else {
     reply += ` That counts toward this week, and your fitness estimate reflects what you actually did.`;
+  }
+
+  if (isRace) {
+    actions.push({ type: "recordResult", seconds: raceTime, meters: Math.round(raceKm * 1000) });
+    const newVdot = vdotFromRace(raceTime, raceKm * 1000);
+    const oldVdot = plan.vdot;
+    reply += `\n\nThat's a measured effort, so I've used it the way I'd use a test: your fitness moves from ${oldVdot ? oldVdot.toFixed(1) : "estimated"} to ${newVdot.toFixed(1)}, and every training pace recalculates off it.`;
+    if (oldVdot && newVdot > oldVdot) {
+      reply += ` Your easy runs will get slightly quicker — resist the urge to run them quicker still.`;
+    } else if (oldVdot && newVdot < oldVdot - 1) {
+      reply += ` That's below what you'd been training at. One flat day isn't a trend, so I've taken the number at face value rather than reading anything into it.`;
+    }
   }
 
   return { intent: "logActual", reply: reply + paceNote, actions };
@@ -1014,6 +1109,43 @@ function pushResponse({ t, user, plan, adaptation, todayKey }) {
     reply: `Good — volume up to ${Math.round(next * 100)}% from today.\n\nOne thing I won't do is make your easy days harder. Feeling strong is the signal to push the hard sessions, and the reason you can push them is that the easy ones stayed easy. If the intervals still feel comfortable next week, tell me again and I'll add more.`,
     actions: [{ type: "setLoad", factor: next, reason: "feeling strong" }],
   };
+}
+
+function explainResponse({ t, plan, adaptation }) {
+  const easy = plan.paces ? formatPace(plan.paces.easy) : null;
+
+  if (hasAny(t, [" easy pace", " easy runs", " so slow", " too slow", " easy so"])) {
+    return {
+      intent: "explain",
+      reply: `Because easy runs aren't training your speed — they're building the aerobic base that lets you survive the hard sessions.${easy ? ` Yours is ${easy}.` : ""}\n\nRun them at 80% effort and you get a session that's too hard to recover from and too easy to drive adaptation: the worst of both. The discipline of going genuinely slow on easy days is what makes the interval days possible. It should feel almost embarrassingly comfortable.`,
+      actions: [],
+    };
+  }
+  if (hasAny(t, [" intervals", " interval session", " reps"])) {
+    return {
+      intent: "explain",
+      reply: `Intervals raise the ceiling. Short hard efforts with recovery let you accumulate far more time near your maximum than one continuous hard run ever could — that's what lifts your top-end fitness.\n\nThey only work if you arrive fresh, which is why the surrounding days are easy. Hard days hard, easy days easy; the whole plan hangs off that split.`,
+      actions: [],
+    };
+  }
+  if (hasAny(t, [" deload", " down week", " easy week"])) {
+    return {
+      intent: "explain",
+      reply: `A deload is a deliberate cut in volume every fourth week. You don't get fitter during training — you get fitter recovering from it, and the gains you've built land during the lighter week.\n\nSkipping it feels productive and reliably backfires: the following block is where you'd have made the progress, and you arrive at it already tired.`,
+      actions: [],
+    };
+  }
+  if (hasAny(t, [" this session", " today's session", " the point of"])) {
+    const found = plan.weeks.flatMap((w) => w.days).find((d) => d.dateKey === dateKey(new Date()));
+    if (found?.session) {
+      return {
+        intent: "explain",
+        reply: `Today is ${found.session.label} at RPE ${found.session.targetRpe}. ${found.session.targetRpe >= 8 ? "It's one of the two hard sessions this week — the ones that actually move your fitness." : found.session.targetRpe <= 4 ? "It's an easy day. Its job is recovery and aerobic volume, not to make you tired." : "It's a moderate session building sustainable pace."}\n\nThe full breakdown is on the Today tab.`,
+        actions: [],
+      };
+    }
+  }
+  return null;
 }
 
 function informational({ t, plan, adaptation, user, today, todayKey }) {

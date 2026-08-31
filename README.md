@@ -131,6 +131,8 @@ which is why all of it is covered by tests.
 | "remove burpees" / "I want more core work" | Excludes a movement or shifts the emphasis |
 | "did the intervals" / "nailed it today" | Logs the prescribed session as done |
 | "reduce the volume by 20%" | Honours the number you gave |
+| "I ran a 5k PB today, 23:40" | Treats a measured max effort like a test — recalculates every pace |
+| "why is my easy pace so slow" / "what's a deload" | Explains the reasoning, changes nothing |
 | "what am I doing today?" | Answers from your actual plan |
 
 Coverage is measured, not assumed: `probe.html` runs 37 realistic phrasings across
@@ -139,6 +141,20 @@ All 37 are understood. Run it whenever you change the parsing.
 
 **It says when it hasn't understood**, and offers examples instead of guessing. A coach that
 silently misinterprets you is worse than one that admits the gap.
+
+**Where it stops.** Some things are not training problems and the coach refuses to treat
+them as such — it makes no plan change at all, rather than quietly softening next week:
+
+| Disclosure | Response |
+|---|---|
+| Chest tightness, fainting, palpitations, numbness | Stop training, seek care today. Nothing in the plan is touched. |
+| Skipping meals, restricting, purging | No plan change, no numbers, and a route to a GP, dietitian or helpline |
+| Calories, supplements, diet questions | Declined, with a pointer to someone who can actually see you |
+
+Each of these was originally mishandled: chest tightness was treated as a niggle, and
+*"I've been skipping meals to lose weight"* was parsed as a missed session and **rescheduled a
+workout**. Silently doing the wrong thing is worse than admitting the gap, so all three are
+now checked before anything else and covered by tests.
 
 **What it won't do.** It can't change your goal or deadline — that runs the feasibility gate,
 so it hands you to the goal editor instead of quietly retargeting your plan. And it isn't a
@@ -237,7 +253,7 @@ python3 -m http.server 8000
 ```
 
 Open `http://localhost:8000/index.html?demo=1`. Open `/test.html` to run the engine suite
-(218 checks: VDOT math, plan structure, scheduling, volume ramp, intensity, every adaptation
+(239 checks: VDOT math, plan structure, scheduling, volume ramp, intensity, every adaptation
 rule, derived fitness, schedule history, feasibility, and coverage of every requirement).
 
 It must be served over HTTP — `file://` breaks ES module imports.
@@ -394,5 +410,5 @@ targets) lives in `plan-engine.js`.
 ## Cache-busting
 
 `index.html`, `app.js`, `plan-engine.js`, and `coach.js` carry `?v=` on their imports —
-currently `v=24`.
+currently `v=25`.
 Bump them on every deploy that touches CSS or JS, or phones will serve stale copies for days.
