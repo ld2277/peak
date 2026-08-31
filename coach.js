@@ -12,12 +12,12 @@
 import {
   dateKey, parseDateKey, addDays, weekdayIndex, WEEKDAYS, WEEKDAYS_SHORT,
   formatDuration, formatPace, INJURY_FOCUS_LABELS,
-} from "./plan-engine.js?v=21";
+} from "./plan-engine.js?v=24";
 
 // ---------------------------------------------------------------- text utils
 
 function normalise(text) {
-  return ` ${String(text || "").toLowerCase().replace(/[’']/g, "'").replace(/[^a-z0-9'\s:.\-\/]/g, " ").replace(/\s+/g, " ").trim()} `;
+  return ` ${String(text || "").toLowerCase().replace(/[’']/g, "'").replace(/[^a-z0-9'\s:.\-\/%]/g, " ").replace(/\s+/g, " ").trim()} `;
 }
 
 function has(t, ...words) {
@@ -138,6 +138,41 @@ function detectActivitySegments(t) {
   }
   // Merge a leading bare duration into the following activity ("for an hour, tennis").
   return out.filter((x) => x.activity || x.minutes || x.km);
+}
+
+// Movements the plan actually prescribes. Used to tell "I can't do pull-ups"
+// (an exercise constraint) apart from "I can't train Thursday" (a day off) —
+// previously both matched "can't do" and a training day got silently blocked.
+const EXERCISE_TERMS = [
+  "pull-up", "pull up", "pullup", "chin-up", "chin up", "push-up", "push up", "pushup",
+  "squat", "lunge", "plank", "burpee", "dip", "row", "deadlift", "rdl", "glute bridge",
+  "calf raise", "step-up", "step up", "mountain climber", "hollow", "dead bug",
+  "bird-dog", "superman", "nordic", "copenhagen", "wall sit", "pike", "jump", "crunch",
+  "sit-up", "sit up", "bench press", "bench", "curl", "press", "core work", "abs",
+];
+
+function detectExercises(t) {
+  return EXERCISE_TERMS.filter((x) => t.includes(` ${x}`));
+}
+
+// Kit someone might not have. Removing it prunes every movement that needs it.
+const GEAR_PHRASES = [
+  { gear: "bar", words: ["pull-up bar", "pull up bar", "pullup bar", "bar to hang", "chin-up bar"] },
+  { gear: "band", words: ["resistance band", "bands", "band"] },
+  { gear: "step", words: ["bench", "step", "box"] },
+  { gear: "mat", words: ["mat"] },
+];
+
+function detectMissingGear(t) {
+  if (!hasAny(t, [" don't have", " do not have", " no access", " haven't got", " without a", " without any", " lack a"])) return [];
+  return GEAR_PHRASES.filter((g) => hasAny(t, g.words.map((w) => ` ${w}`))).map((g) => g.gear);
+}
+
+// "replace X with Y" / "swap X for Y" / "Y instead of X"
+function detectSubstitution(t) {
+  let m = t.match(/\b(?:replace|swap|switch|change)\s+(?:the\s+)?([a-z\-\s]{3,20}?)\s+(?:with|for|to)\s+(?:the\s+)?([a-z\-\s]{3,20}?)(?:\s|$|\.)/);
+  if (m) return { from: m[1].trim(), to: m[2].trim() };
+  return null;
 }
 
 const BODY_PARTS = [
@@ -266,6 +301,10 @@ const PAIN_WORDS = [" hurt", " hurts", " hurting", " sore", " soreness", " pain"
   " niggle", " niggling", " tight", " tightness", " strain", " strained", " pulled", " injured",
   " injury", " ache", " aching", " swollen", " twinge"];
 
+const DONE_WORDS = [" completed", " finished", " done", " did the", " done the", " nailed", " smashed it", " got it done",
+  " ticked off", " all done", " session done", " workout done", " did today's", " did the session",
+  " did the workout", " did it", " job done"];
+
 const MISS_WORDS = [" missed", " skipped", " skip", " didn't do", " did not do", " didn't train",
   " did not train", " couldn't train", " could not train", " no time", " bailed", " gave up",
   " didn't manage", " did not manage", " never got", " didn't get out", " nothing today"];
@@ -341,7 +380,46 @@ export function coachRespond(message, ctx) {
     };
   }
 
-  // ---- 2b. Add or remove standing sessions. Checked before the "did something
+  const exercises = detectExercises(t);
+  const missingGear = detectMissingGear(t);
+  const substitution = detectSubstitution(t);
+
+  // ---- 2a. Exercise-level changes. Checked early because "I can't do
+  //          pull-ups" used to match the availability rules and silently block
+  //          a whole training day.
+  // "add 2 strength sessions with pull-ups on Tuesdays" names an exercise but
+  // is a request for SESSIONS on named days. Weekdays plus a session noun mean
+  // it belongs to the scheduling branch, not the exercise branch.
+  const sessionScoped = detectWeekdays(t).length > 0 &&
+    hasAny(t, [" session", " sessions", " workout", " workouts", " run", " runs", " day", " days"]);
+
+  if (substitution || missingGear.length ||
+      (!sessionScoped && exercises.length && hasAny(t, [" can't do", " cannot do", " can't manage",
+        " hate ", " hurt my", " remove ", " drop the", " no more", " less ", " more ", " don't want",
+        " do not want", " skip the", " take out", " get rid of", " add ", " include "]))) {
+    return exerciseResponse({ t, exercises, missingGear, substitution, user });
+  }
+
+  // ---- 2b. Change the schedule itself (how often, how long).
+  const sched = detectScheduleChange(t);
+  if (sched) return scheduleResponse({ t, change: sched, user });
+
+  // ---- 2b2. Resizing one specific session isn't something the plan models.
+  //           Say so, and offer the two things that do work.
+  if (hasAny(t, [" shorten", " lengthen", " make it shorter", " make it longer", " cut short"])) {
+    const named = detectPlannedTypeLoose(t);
+    return {
+      intent: "resizeSession",
+      reply: `I can't resize one session on its own — session length is a single setting across your plan, so changing it for the ${named ? (ADD_TYPE_LABEL[named] || named) : "session"} would change all of them.\n\nTwo things that do work: tell me "reduce the volume by 15%" and I'll trim everything proportionally, or "make my sessions 45 minutes" to reset the cap. If it's only this week, just do what you can and log it — I'd rather have the honest number.`,
+      actions: [],
+    };
+  }
+
+  // ---- 2c. Move or swap a specific session.
+  const rearrange = detectRearrange(t, today, plan, adaptation);
+  if (rearrange) return rearrange;
+
+  // ---- 2d. Add or remove standing sessions. Checked before the "did something
   //          different" branch, because "add a run on Tuesdays" mentions an
   //          activity but is a schedule request, not a session report.
   const addDays = detectWeekdays(t);
@@ -352,11 +430,19 @@ export function coachRespond(message, ctx) {
     return removeSessionsResponse({ t, weekdays: addDays, user, plan });
   }
 
+  // ---- 2e. "Did today's session" — the prescribed work, as written.
+  if (hasAny(t, DONE_WORDS) && !minutes && !km && !hasAny(t, MISS_WORDS)) {
+    return completedResponse({ t, dates, plan, user, today, todayKey });
+  }
+
   // ---- 3. Did something other than what was prescribed.
-  const didSomething = (activity || minutes || km) &&
+  //         An activity plus a duration or distance is a session report on its
+  //         own — it doesn't need "I did" in front of it.
+  const didSomething = ((activity && (minutes || km)) || activity || minutes || km) &&
     (hasAny(t, [" instead", " rather than", " swapped", " ended up", " only did", " only managed",
                 " just did", " did ", " ran ", " went ", " i did", " i ran", " managed"]) ||
-     /\bi (ran|did|went|swam|cycled|biked|rowed|walked|lifted)\b/.test(t));
+     /\bi (ran|did|went|swam|cycled|biked|rowed|walked|lifted)\b/.test(t) ||
+     (activity && (minutes || km)));
 
   if (didSomething && !hasAny(t, UNAVAILABLE_WORDS)) {
     return loggedDifferently({ t, dates, minutes, km, activity, plan, user, today, todayKey });
@@ -368,7 +454,8 @@ export function coachRespond(message, ctx) {
   }
 
   // ---- 5. Not available on specific days.
-  if (hasAny(t, UNAVAILABLE_WORDS) || (dates.length && hasAny(t, [" can't", " cannot", " won't", " no "]))) {
+  if (!exercises.length &&
+      (hasAny(t, UNAVAILABLE_WORDS) || (dates.length && hasAny(t, [" can't", " cannot", " won't", " no "])))) {
     return unavailableResponse({ t, dates, plan, user, today, todayKey });
   }
 
@@ -426,6 +513,181 @@ function painResponse({ t, part, user, plan, adaptation, today, todayKey }) {
   }
 
   return { intent: "pain", reply, actions, severity: severe ? "high" : "normal" };
+}
+
+// "train 5 times a week", "make my sessions 45 minutes"
+function detectScheduleChange(t) {
+  // "gym session done, 45 min" is a log, not an instruction to resize every
+  // session. Reporting words disqualify the whole branch.
+  if (hasAny(t, DONE_WORDS)) return null;
+
+  const out = {};
+  let m = t.match(/\b(\d)\s*(?:times|sessions|days|x)\s*(?:a|per)\s*week\b/);
+  if (m) out.sessionsPerWeek = Math.max(2, Math.min(6, parseInt(m[1], 10)));
+
+  // Changing session length needs an explicit imperative, not just the word
+  // "session" sitting next to a number.
+  const imperative = /\b(make|change|set|switch|move)\s+(my|them|the|to)\b/.test(t)
+    || /\bi\s+(want|'d like|would like)\b/.test(t);
+  m = t.match(/\b(\d{2,3})\s*(?:min|mins|minute|minutes)\b/);
+  if (m && imperative && hasAny(t, [" session", " sessions", " workout", " workouts", " training", " each", " them"])) {
+    out.minutesPerSession = Math.max(20, Math.min(120, parseInt(m[1], 10)));
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function scheduleResponse({ t, change, user }) {
+  const bits = [];
+  if (change.sessionsPerWeek) bits.push(`${change.sessionsPerWeek} sessions a week`);
+  if (change.minutesPerSession) bits.push(`${change.minutesPerSession} min each`);
+
+  const now = user.schedule;
+  const goingUp = change.sessionsPerWeek && change.sessionsPerWeek > now.sessionsPerWeek;
+
+  let reply = `Schedule updated to ${bits.join(", ")}. The plan rebuilds around it from this week, and your logged history stays exactly as it is.`;
+  if (goingUp) {
+    reply += `\n\nGoing from ${now.sessionsPerWeek} to ${change.sessionsPerWeek} is a real jump in weekly load. Give it a fortnight before judging it, and tell me if it's too much — I'd rather pull it back than have you miss sessions.`;
+  } else if (change.sessionsPerWeek && change.sessionsPerWeek < now.sessionsPerWeek) {
+    reply += `\n\nFewer sessions you actually complete beats more that you don't. This is usually the right call, not a retreat.`;
+  }
+  return { intent: "scheduleChange", reply, actions: [{ type: "setSchedule", change }] };
+}
+
+// "move my long run to Sunday", "swap Tuesday and Thursday"
+function detectRearrange(t, today, plan, adaptation) {
+  const wds = detectWeekdays(t);
+  const wk = plan.weeks.find((w) => w.num === adaptation.currentWeek) || plan.weeks[0];
+  if (!wk) return null;
+
+  // Swap two named days.
+  if (hasAny(t, [" swap ", " switch ", " exchange "]) && wds.length === 2 && !detectSubstitution(t)) {
+    const a = wk.days.find((d) => d.weekdayIndex === wds[0]);
+    const b = wk.days.find((d) => d.weekdayIndex === wds[1]);
+    if (!a || !b) return null;
+    return {
+      intent: "swapDays",
+      reply: `Swapped ${WEEKDAYS[wds[0]]} and ${WEEKDAYS[wds[1]]} this week — ${a.session ? a.session.label.toLowerCase() : "the rest day"} and ${b.session ? b.session.label.toLowerCase() : "the rest day"} change places.`,
+      actions: [{ type: "swapDays", a: a.dateKey, b: b.dateKey }],
+    };
+  }
+
+  // Move a named session to a named day.
+  if (hasAny(t, [" move ", " shift ", " put the", " do the"]) && wds.length === 1) {
+    const type = detectAddType(t) || detectPlannedTypeLoose(t);
+    if (!type) return null;
+    const src = wk.days.find((d) => d.session && d.session.type === type);
+    const dst = wk.days.find((d) => d.weekdayIndex === wds[0]);
+    if (!src || !dst) {
+      return {
+        intent: "move",
+        reply: `I couldn't find a ${ADD_TYPE_LABEL[type] || type} session in this week to move. Check the Week tab and tell me the day it's on.`,
+        actions: [],
+      };
+    }
+    if (dst.session) {
+      return {
+        intent: "move",
+        reply: `${WEEKDAYS[wds[0]]} already has ${dst.session.label.toLowerCase()} on it, and I won't stack two sessions on one day. Tell me which day to clear and I'll move both.`,
+        actions: [],
+      };
+    }
+    return {
+      intent: "move",
+      reply: `Moved the ${src.session.label.toLowerCase()} to ${WEEKDAYS[wds[0]]}.`,
+      actions: [{ type: "moveSession", from: src.dateKey, to: dst.dateKey }],
+    };
+  }
+  return null;
+}
+
+// Looser than detectPlannedType: doesn't require a substitution cue.
+function detectPlannedTypeLoose(t) {
+  for (const p of PLANNED_TYPE_WORDS) if (hasAny(t, p.words.map((w) => ` ${w}`))) return p.key;
+  return null;
+}
+
+function exerciseResponse({ t, exercises, missingGear, substitution, user }) {
+  const rules = { ...(user.coachOverrides?.exerciseRules || {}) };
+  const actions = [];
+  let reply = "";
+
+  if (missingGear.length) {
+    rules.noGear = [...new Set([...(rules.noGear || []), ...missingGear])];
+    const names = { bar: "a pull-up bar", band: "a resistance band", step: "a bench or step", mat: "a mat" };
+    reply = `Noted — no ${missingGear.map((g) => names[g]).join(" or ")}. I've dropped every movement that needs it and the plan will pick alternatives that don't.`;
+    actions.push({ type: "setExerciseRules", rules });
+  }
+
+  else if (substitution) {
+    rules.substitute = { ...(rules.substitute || {}), [substitution.from]: substitution.to };
+    reply = `Swapped ${substitution.from} for ${substitution.to} wherever it comes up. Match the sets and reps the plan gives you — the point of the slot is the movement pattern, not the exact exercise.`;
+    actions.push({ type: "setExerciseRules", rules });
+  }
+
+  else if (hasAny(t, [" can't do", " cannot do", " can't manage", " hurt my", " remove ", " drop the",
+                      " no more", " don't want", " do not want", " skip the", " take out",
+                      " get rid of", " less ", " hate "])) {
+    rules.exclude = [...new Set([...(rules.exclude || []), ...exercises])];
+    reply = `Taken ${exercises.join(" and ")} out of your plan. The slot stays — you'll get a different movement working the same thing, so nothing goes missing.`;
+    if (exercises.some((e) => /pull-up|chin/.test(e))) {
+      reply += `\n\nIf it's strength rather than preference, band-assisted pull-ups and slow negatives from the top are how people get their first one. Say the word and I'll put those in instead.`;
+    }
+    actions.push({ type: "setExerciseRules", rules });
+  }
+
+  else if (hasAny(t, [" more ", " add ", " include "])) {
+    rules.emphasis = [...new Set([...(rules.emphasis || []), ...exercises])];
+    reply = `Added more ${exercises.join(" and ")} work to your strength sessions.`;
+    actions.push({ type: "setExerciseRules", rules });
+  }
+
+  else {
+    return {
+      intent: "unknown",
+      reply: `I got that you're talking about ${exercises.join(" and ")}, but not what you want done. Try "replace pull-ups with dips", "remove burpees", or "I don't have a pull-up bar".`,
+      actions: [],
+    };
+  }
+
+  return { intent: "exerciseRules", reply, actions };
+}
+
+function completedResponse({ t, dates, plan, user, today, todayKey }) {
+  let key = dates[0] || todayKey;
+
+  // "did the intervals" names the session rather than the day — find it.
+  const named = detectPlannedTypeLoose(t);
+  if (!dates.length && named) {
+    const onToday = sessionOn(plan, todayKey);
+    if (onToday?.day?.session?.type !== named) {
+      const wk = plan.weeks.find((w) => w.days.some((d) => d.dateKey === todayKey));
+      const match = wk?.days.find((d) => d.session && d.session.type === named);
+      if (match) key = match.dateKey;
+    }
+  }
+
+  const found = sessionOn(plan, key);
+  if (!found || found.day.isRest) {
+    return {
+      intent: "completed",
+      reply: `Nothing was scheduled for ${prettyShort(key).toLowerCase()}, so there's nothing to tick off.`,
+      actions: [],
+    };
+  }
+  const s = found.day.session;
+  let rpe = s.targetRpe;
+  if (hasAny(t, BAD_FEEL)) rpe = Math.min(10, rpe + 2);
+  else if (hasAny(t, GOOD_FEEL)) rpe = Math.max(1, rpe - 1);
+
+  return {
+    intent: "completed",
+    reply: `Logged ${prettyShort(key).toLowerCase()}'s ${s.label.toLowerCase()} as done at RPE ${rpe}. ${hasAny(t, GOOD_FEEL) ? "Good — that's the plan working." : "That's this week moving."}`,
+    actions: [{
+      type: "logActual",
+      dateKey: key,
+      session: { type: s.type, minutes: s.minutes, rpe, plannedRpe: s.targetRpe, label: s.label, note: "" },
+    }],
+  };
 }
 
 function addSessionsResponse({ t, weekdays, type, user, plan, adaptation }) {
@@ -711,7 +973,10 @@ function unavailableResponse({ t, dates, plan, user, today, todayKey }) {
 
 function easeResponse({ t, user, plan, adaptation, todayKey }) {
   const current = user.coachOverrides?.loadFactor ?? 1;
-  const next = Math.max(0.7, Math.round((current - 0.12) * 100) / 100);
+  // If they named a number, use it rather than the default step.
+  const pct = t.match(/\b(\d{1,2})\s*%/);
+  const step = pct ? Math.min(0.3, parseInt(pct[1], 10) / 100) : 0.12;
+  const next = Math.max(0.7, Math.round((current - step) * 100) / 100);
   const persistent = hasAny(t, [" every session", " all the time", " for weeks", " every week", " constantly"]);
 
   let reply = `Cut back — volume is now ${Math.round(next * 100)}% of what it was, starting today. Intensity targets stay where they are: when you're tired, the answer is less work, not the same work done worse.`;
@@ -731,7 +996,9 @@ function easeResponse({ t, user, plan, adaptation, todayKey }) {
 
 function pushResponse({ t, user, plan, adaptation, todayKey }) {
   const current = user.coachOverrides?.loadFactor ?? 1;
-  const next = Math.min(1.15, Math.round((current + 0.08) * 100) / 100);
+  const pct = t.match(/\b(\d{1,2})\s*%/);
+  const step = pct ? Math.min(0.15, parseInt(pct[1], 10) / 100) : 0.08;
+  const next = Math.min(1.15, Math.round((current + step) * 100) / 100);
   const capped = next === current;
 
   if (capped) {

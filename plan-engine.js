@@ -5,7 +5,7 @@
 import {
   WARMUPS, COOLDOWNS, strengthBlock, conditioningBlock, prehabBlock,
   MOBILITY_FLOW, INJURY_FOCUS_LABELS,
-} from "./workouts.js?v=21";
+} from "./workouts.js?v=24";
 
 export { INJURY_FOCUS_LABELS };
 
@@ -390,7 +390,7 @@ function tempoPrescription(phase, minutes) {
   return `${Math.min(35, budget)} min continuous @ RPE 8`;
 }
 
-function buildSession({ type, minutes, tier, phase, weekNum, weekInPhase, paces, vdot, injuryFocus, goal, longMinutes }) {
+function buildSession({ type, minutes, tier, phase, weekNum, weekInPhase, paces, vdot, injuryFocus, goal, longMinutes, exerciseRules }) {
   const gear = new Set(["timer"]);
   const lines = [];
   let label = TYPE_LABELS[type] || type;
@@ -447,7 +447,7 @@ function buildSession({ type, minutes, tier, phase, weekNum, weekInPhase, paces,
 
   else if (type === "strength" || type === "lower" || type === "upper" || type === "full") {
     const focus = type === "strength" ? "full" : type;
-    const block = strengthBlock({ focus, tier, minutes: mins, seed: weekNum });
+    const block = strengthBlock({ focus, tier, minutes: mins, seed: weekNum, rules: exerciseRules });
     block.gear.forEach((g) => gear.add(g));
     lines.push(`Warm-up: ${WARMUPS.strength.join(" · ")}`);
     lines.push(...block.lines);
@@ -543,6 +543,17 @@ function applyCoachOverrides(dayEntries, user, makeSession, weekNum) {
     src.session = null;
     src.isRest = true;
     src.movedTo = to;
+  }
+
+  // 1b. Explicit day swaps.
+  for (const [ka, kb] of co.swaps || []) {
+    const a = byKey[ka], b = byKey[kb];
+    if (!a || !b) continue;
+    const tmp = a.session;
+    a.session = b.session;
+    b.session = tmp;
+    a.isRest = !a.session;
+    b.isRest = !b.session;
   }
 
   // 2. Days the athlete told us they can't train.
@@ -765,6 +776,7 @@ export function buildPlan(user, adaptation) {
           weekInPhase,
           paces,
           vdot,
+          exerciseRules: user.coachOverrides?.exerciseRules || null,
           injuryFocus: profile.injuryFocus || [],
           goal,
           longMinutes: cappedLong,
@@ -780,7 +792,8 @@ export function buildPlan(user, adaptation) {
       user,
       (type) => buildSession({
         type, minutes: sessionMinutes, tier, phase, weekNum: w, weekInPhase,
-        paces, vdot, injuryFocus: profile.injuryFocus || [], goal, longMinutes: cappedLong,
+        paces, vdot, exerciseRules: user.coachOverrides?.exerciseRules || null,
+        injuryFocus: profile.injuryFocus || [], goal, longMinutes: cappedLong,
       }),
       w
     );

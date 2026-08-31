@@ -2,7 +2,7 @@
 // Cache-busting: bump ?v= here and in index.html on every deploy that changes
 // app.js, plan-engine.js, workouts.js, or style.css.
 
-import { firebaseConfig } from "./firebase-config.js?v=21";
+import { firebaseConfig } from "./firebase-config.js?v=24";
 import {
   WORKOUT_FREQ, CARDIO_FREQ, RUN_DURATION, INJURY_FOCUS_LABELS,
   WEEKDAYS, WEEKDAYS_SHORT, COMMITMENT_LOADS, SESSION_COUNTS, SESSION_MINUTES,
@@ -11,9 +11,9 @@ import {
   formatDuration, formatPace, paceToMile, parseTimeToSeconds,
   buildPlan, getWeek, getDayForDate, computeAdaptation, goalAssessment,
   feasibilityReport, deriveFitness, pruneCoachOverrides,
-} from "./plan-engine.js?v=21";
-import { RPE_SCALE, GEAR_LABELS } from "./workouts.js?v=21";
-import { coachRespond } from "./coach.js?v=21";
+} from "./plan-engine.js?v=24";
+import { RPE_SCALE, GEAR_LABELS } from "./workouts.js?v=24";
+import { coachRespond } from "./coach.js?v=24";
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
@@ -1618,6 +1618,39 @@ async function applyCoachActions(actions) {
       touchedOverrides = true;
     }
 
+    else if (a.type === "setExerciseRules") {
+      co.exerciseRules = a.rules;
+      touchedOverrides = true;
+    }
+
+    else if (a.type === "swapDays") {
+      co.swaps = [...(co.swaps || []), [a.a, a.b]].slice(-20);
+      touchedOverrides = true;
+    }
+
+    else if (a.type === "setSchedule") {
+      const schedule = { ...user.schedule, ...a.change };
+      const history = [...(user.scheduleHistory || [{ fromWeek: 1, sessionsPerWeek: user.schedule.sessionsPerWeek }])];
+      if (a.change.sessionsPerWeek && a.change.sessionsPerWeek !== user.schedule.sessionsPerWeek) {
+        const week = adaptation.currentWeek;
+        if (history.length && history[history.length - 1].fromWeek === week) {
+          history[history.length - 1] = { fromWeek: week, sessionsPerWeek: a.change.sessionsPerWeek };
+        } else {
+          history.push({ fromWeek: week, sessionsPerWeek: a.change.sessionsPerWeek });
+        }
+      }
+      user.schedule = schedule;
+      user.scheduleHistory = history;
+      patch.schedule = schedule;
+      patch.scheduleHistory = history;
+      const bits = [];
+      if (a.change.sessionsPerWeek) bits.push(`${a.change.sessionsPerWeek} sessions a week`);
+      if (a.change.minutesPerSession) bits.push(`${a.change.minutesPerSession} min each`);
+      patch.changeLog = [...(user.changeLog || []),
+        { week: adaptation.currentWeek, at: Date.now(), text: `Schedule changed to ${bits.join(", ")} (via coach).` }].slice(-200);
+      user.changeLog = patch.changeLog;
+    }
+
     else if (a.type === "addInjuryFocus") {
       const list = [...new Set([...(user.profile.injuryFocus || []), a.part])].slice(0, 8);
       user.profile = { ...user.profile, injuryFocus: list };
@@ -1715,6 +1748,9 @@ async function sendToCoach() {
       if (a.type === "softenDays") changes.push("Impact removed");
       if (a.type === "addRecurringSessions") changes.push(`+${a.weekdays.length} weekly session${a.weekdays.length === 1 ? "" : "s"}`);
       if (a.type === "removeRecurringSessions") changes.push("Session removed");
+      if (a.type === "setExerciseRules") changes.push("Exercises updated");
+      if (a.type === "swapDays") changes.push("Days swapped");
+      if (a.type === "setSchedule") changes.push("Schedule updated");
       if (a.type === "addInjuryFocus") changes.push("Prehab added");
     }
 

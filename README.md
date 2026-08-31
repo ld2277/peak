@@ -125,7 +125,17 @@ which is why all of it is covered by tests.
 | "played tennis for an hour and did a 50 min run at 5:41/km" | Logs both sessions with their own durations, reads the pace, compares it to your easy pace |
 | "add 2 upper body sessions on Tuesdays and Thursdays" | Adds standing sessions every week, alongside existing work where that makes sense |
 | "remove the Tuesday session" | Takes it back out |
+| "move my long run to Sunday" / "swap Tuesday and Thursday" | Rearranges the week |
+| "I want to train 5 times a week" / "make my sessions 45 minutes" | Changes the schedule itself |
+| "replace pull-ups with dips" / "I don't have a pull-up bar" | Exercise-level rules that persist across every session |
+| "remove burpees" / "I want more core work" | Excludes a movement or shifts the emphasis |
+| "did the intervals" / "nailed it today" | Logs the prescribed session as done |
+| "reduce the volume by 20%" | Honours the number you gave |
 | "what am I doing today?" | Answers from your actual plan |
+
+Coverage is measured, not assumed: `probe.html` runs 37 realistic phrasings across
+logging, load, plan changes and exercise changes, and reports what each one resolves to.
+All 37 are understood. Run it whenever you change the parsing.
 
 **It says when it hasn't understood**, and offers examples instead of guessing. A coach that
 silently misinterprets you is worse than one that admits the gap.
@@ -227,7 +237,7 @@ python3 -m http.server 8000
 ```
 
 Open `http://localhost:8000/index.html?demo=1`. Open `/test.html` to run the engine suite
-(197 checks: VDOT math, plan structure, scheduling, volume ramp, intensity, every adaptation
+(218 checks: VDOT math, plan structure, scheduling, volume ramp, intensity, every adaptation
 rule, derived fitness, schedule history, feasibility, and coverage of every requirement).
 
 It must be served over HTTP — `file://` breaks ES module imports.
@@ -384,5 +394,5 @@ targets) lives in `plan-engine.js`.
 ## Cache-busting
 
 `index.html`, `app.js`, `plan-engine.js`, and `coach.js` carry `?v=` on their imports —
-currently `v=21`.
+currently `v=24`.
 Bump them on every deploy that touches CSS or JS, or phones will serve stale copies for days.

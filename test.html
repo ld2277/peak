@@ -31,8 +31,8 @@ import {
   feasibilityReport, achievableVdotGain, EVENT_REQUIREMENTS,
   deriveFitness, sessionsScheduledForWeek, baselineVdot, parseDateKey,
   pruneCoachOverrides,
-} from "./plan-engine.js?v=21";
-import { coachRespond } from "./coach.js?v=21";
+} from "./plan-engine.js?v=24";
+import { coachRespond } from "./coach.js?v=24";
 
 const out = document.getElementById("out");
 let pass = 0, fail = 0;
@@ -723,6 +723,95 @@ check("Standing sessions can be removed", rRem.actions.some((a) => a.type === "r
 check("An add request is not mistaken for a session report",
   say("add an easy run on Wednesdays").intent === "addSession",
   say("add an easy run on Wednesdays").intent);
+
+section("Coach — exercise-level control");
+
+function planWithRules(rules) {
+  const uu = mkUser({ schedule: { sessionsPerWeek: 5, minutesPerSession: 60, commitments: {} } });
+  uu.planStart = dateKey(monday);
+  uu.coachOverrides = { exerciseRules: rules, extraSessions: [{ weekday: 2, type: "upper", fromWeek: 1 }] };
+  return buildPlan(uu, computeAdaptation(uu));
+}
+const strengthLines = (pl) => pl.weeks.flatMap((w) => w.days)
+  .flatMap((d) => [d.session, d.extraSession]).filter(Boolean)
+  .filter((x) => ["strength", "upper", "lower", "full"].includes(x.type))
+  .flatMap((x) => x.lines);
+
+const baseLines = strengthLines(planWithRules(null));
+check("Baseline strength sessions contain pull-ups", baseLines.some((l) => /pull-up/i.test(l)));
+
+const noPull = strengthLines(planWithRules({ exclude: ["pull-up"] }));
+check("An excluded movement disappears everywhere", !noPull.some((l) => /pull-up/i.test(l)));
+check("Excluding a movement doesn't empty the session", noPull.length >= baseLines.length * 0.6,
+  `${noPull.length} lines vs ${baseLines.length}`);
+
+const noBar = strengthLines(planWithRules({ noGear: ["bar"] }));
+check("Missing kit prunes everything that needs it",
+  !noBar.some((l) => /pull-up|inverted row/i.test(l)));
+check("Sessions still have real work without that kit", noBar.length > 0);
+
+const swapped = strengthLines(planWithRules({ substitute: { "pull-up": "dips" } }));
+check("A substitution renders the replacement", swapped.some((l) => /dips/i.test(l)), swapped.find((l) => /swapped/i.test(l)));
+check("A substitution says what it replaced", swapped.some((l) => /swapped in for pull-up/i.test(l)));
+
+const moreCore = planWithRules({ emphasis: ["core work"] });
+const coreCount = (pl) => strengthLines(pl).filter((l) => /plank|dead bug|hollow|side plank|pallof/i.test(l)).length;
+check("Emphasis adds more core work", coreCount(moreCore) > coreCount(planWithRules(null)),
+  `${coreCount(moreCore)} vs ${coreCount(planWithRules(null))}`);
+
+check("A pool emptied by rules falls back rather than producing a blank session",
+  strengthLines(planWithRules({ exclude: ["squat", "lunge", "bridge", "step-up", "calf raise", "wall sit"] })).length > 0);
+
+section("Coach — misreadings that used to change the plan");
+
+// These previously fired the WRONG intent and silently altered the plan.
+const rNoPull = say("I can't do pull-ups");
+check("An exercise constraint never blocks a training day",
+  !rNoPull.actions.some((a) => ["blockDates", "moveSession"].includes(a.type)),
+  JSON.stringify(rNoPull.actions.map((a) => a.type)));
+check("It is handled as an exercise rule", rNoPull.intent === "exerciseRules", rNoPull.intent);
+
+const rGymLog = say("gym session done, 45 min");
+check("A duration in a session report never resizes every session",
+  !rGymLog.actions.some((a) => a.type === "setSchedule"),
+  JSON.stringify(rGymLog.actions.map((a) => a.type)));
+check("It is logged instead", rGymLog.intent === "logActual", rGymLog.intent);
+
+check("An explicit request still resizes sessions",
+  say("make my sessions 45 minutes").actions.some((a) => a.type === "setSchedule" && a.change.minutesPerSession === 45));
+check("A named percentage is honoured", (() => {
+  const r = say("reduce the volume by 20%");
+  const a = r.actions.find((x) => x.type === "setLoad");
+  return a && Math.abs(a.factor - 0.8) < 0.001;
+})(), JSON.stringify(say("reduce the volume by 20%").actions));
+
+section("Coach — rearranging");
+const rMove = say("move my long run to Sunday");
+check("A named session can be moved to a named day",
+  rMove.actions.some((a) => a.type === "moveSession"), rMove.intent);
+const rSwap = say("swap Tuesday and Thursday");
+check("Two days can be swapped", rSwap.actions.some((a) => a.type === "swapDays"), rSwap.intent);
+
+const swapPlan = (() => {
+  const uu = mkUser(); uu.planStart = dateKey(monday);
+  const base = buildPlan(uu, computeAdaptation(uu));
+  const d1 = base.weeks[0].days[1], d2 = base.weeks[0].days[3];
+  uu.coachOverrides = { swaps: [[d1.dateKey, d2.dateKey]] };
+  return { base, after: buildPlan(uu, computeAdaptation(uu)) };
+})();
+check("A swap actually exchanges the two days", (() => {
+  const b = swapPlan.base.weeks[0].days, a = swapPlan.after.weeks[0].days;
+  return (b[1].session?.type || null) === (a[3].session?.type || null)
+      && (b[3].session?.type || null) === (a[1].session?.type || null);
+})());
+check("A swap doesn't change how many sessions the week has",
+  swapPlan.after.weeks[0].days.filter((d) => !d.isRest).length ===
+  swapPlan.base.weeks[0].days.filter((d) => !d.isRest).length);
+
+check("Completion reports log the prescribed session",
+  say("finished today's workout").actions.some((a) => a.type === "logActual"));
+check("Naming a session logs that one",
+  say("did the intervals").intent === "completed");
 
 section("Sample week output");
 u = mkUser(); a = computeAdaptation(u); plan = buildPlan(u, a);

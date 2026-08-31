@@ -1,0 +1,58 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Coach probe</title>
+<style>body{font-family:ui-monospace,Menlo,monospace;background:#0A0A0A;color:#eee;padding:20px;font-size:12px}
+h2{color:#D8FF00;margin:22px 0 8px}td{padding:4px 10px 4px 0;vertical-align:top;border-bottom:1px solid #222}
+.ok{color:#D8FF00}.bad{color:#FF4D4D}.meh{color:#FFB020}</style></head><body>
+<div id="out">running…</div>
+<script type="module">
+import { buildPlan, computeAdaptation, dateKey, mondayOnOrBefore } from "./plan-engine.js?v=24";
+import { coachRespond } from "./coach.js?v=24";
+
+const monday = mondayOnOrBefore(new Date());
+const user = {
+  name:"T", planStart: dateKey(monday),
+  profile:{workoutsPerWeek:"low",cardioPerWeek:"mid",runDuration:"to45",fiveKSeconds:1530,injuryFocus:[]},
+  schedule:{sessionsPerWeek:4,minutesPerSession:60,commitments:{}},
+  goal:{type:"endurance",event:"tenK",targetSeconds:null,deadline:dateKey(new Date(monday.getFullYear(),monday.getMonth()+3,monday.getDate()))},
+  logs:{},tests:{},coachOverrides:{}
+};
+const a = computeAdaptation(user);
+const plan = buildPlan(user, a);
+const ask = (m) => coachRespond(m, {user, plan, adaptation:a, today:monday});
+
+const GROUPS = {
+ "A — Logging a training":[
+  "did 45 min easy this morning","ran 10k today","I went for a 40 minute run",
+  "completed today's session","did the intervals","swam 1km for 30 minutes",
+  "gym session done, 45 min","did my long run, 90 minutes, felt good",
+  "ran 8k in 45 minutes yesterday","finished today's workout","nailed it today"],
+ "B — Pace and load":[
+  "ran at 5:30/km for 40 min","did 50 min at 5:41 min/km","that was way too easy",
+  "this week is too much","I'm exhausted","increase my training load",
+  "reduce the volume by 20%","make next week harder","I want to push harder this block"],
+ "C — Plan changes":[
+  "add a strength session on Fridays","add two easy runs on Monday and Wednesday",
+  "remove the Saturday session","move my long run to Sunday","swap Tuesday and Thursday",
+  "I want to train 5 times a week","make my sessions 45 minutes","can't train Thursday",
+  "shorten my long run"],
+ "D — Specific exercises":[
+  "replace pull-ups with dips","I can't do pull-ups","add bench press to my strength sessions",
+  "remove burpees from the circuit","I don't have a pull-up bar","swap squats for lunges",
+  "I want more core work","less plank please"]
+};
+
+let html = "", fails = 0, total = 0;
+for (const [g, list] of Object.entries(GROUPS)) {
+  html += `<h2>${g}</h2><table>`;
+  for (const m of list) {
+    total++;
+    const r = ask(m);
+    const acts = (r.actions||[]).map(x=>x.type).join(",") || "—";
+    const bad = r.intent === "unknown";
+    const meh = !bad && acts === "—" && r.intent !== "info";
+    if (bad) fails++;
+    html += `<tr><td class="${bad?'bad':meh?'meh':'ok'}">${bad?'✗':meh?'~':'✓'}</td><td>${m}</td><td>${r.intent}</td><td>${acts}</td></tr>`;
+  }
+  html += "</table>";
+}
+document.getElementById("out").innerHTML = `<h2>${total-fails}/${total} understood · ${fails} not understood</h2>` + html;
+</script></body></html>

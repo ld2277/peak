@@ -182,33 +182,70 @@ function pick(pool, count, seed) {
   return out;
 }
 
+// Applies the athlete's own constraints to a movement pool: kit they don't
+// have, movements they've excluded, and one-for-one swaps they asked for.
+// Exclusions never remove a slot — a different movement fills it, so the
+// session still trains the same thing.
+function applyRules(pool, rules) {
+  if (!rules) return pool;
+  const noGear = rules.noGear || [];
+  const exclude = (rules.exclude || []).map((x) => x.toLowerCase());
+  return pool.filter((ex) => {
+    if (ex.gear.some((g) => noGear.includes(g))) return false;
+    if (exclude.some((x) => ex.name.toLowerCase().includes(x))) return false;
+    return true;
+  });
+}
+
+function substituteName(name, rules) {
+  const sub = rules?.substitute || {};
+  for (const [from, to] of Object.entries(sub)) {
+    if (name.toLowerCase().includes(from.toLowerCase())) {
+      return { name: to.replace(/^\w/, (c) => c.toUpperCase()), swappedFrom: from };
+    }
+  }
+  return { name };
+}
+
 // focus: "lower" | "upper" | "full"
-export function strengthBlock({ focus, tier, minutes, seed = 0 }) {
+export function strengthBlock({ focus, tier, minutes, seed = 0, rules = null }) {
   const scheme = SET_SCHEME[tier] || SET_SCHEME.beginner;
   const slots = minutes >= 55 ? 5 : minutes >= 40 ? 4 : 3;
+  const POOL = {
+    lower: applyRules(STRENGTH_POOL.lower, rules),
+    upper: applyRules(STRENGTH_POOL.upper, rules),
+    core: applyRules(STRENGTH_POOL.core, rules),
+  };
+  // If a filter empties a pool entirely, fall back so a session is never blank.
+  for (const k of Object.keys(POOL)) if (!POOL[k].length) POOL[k] = STRENGTH_POOL[k];
   let chosen;
+  const coreSlots = (rules?.emphasis || []).some((e) => /core|abs|plank/i.test(e)) ? 2 : 1;
   if (focus === "lower") {
-    chosen = [...pick(STRENGTH_POOL.lower, slots - 1, seed), ...pick(STRENGTH_POOL.core, 1, seed)];
+    chosen = [...pick(POOL.lower, slots - coreSlots, seed), ...pick(POOL.core, coreSlots, seed)];
   } else if (focus === "upper") {
-    // Always include a vertical pull. An upper session without one is
-    // incomplete, and it's the movement people ask for by name.
-    const pull = STRENGTH_POOL.upper.find((e) => /pull-up/i.test(e.name));
-    const rest = STRENGTH_POOL.upper.filter((e) => e !== pull);
-    chosen = [pull, ...pick(rest, Math.max(1, slots - 2), seed), ...pick(STRENGTH_POOL.core, 1, seed)];
+    // Always include a vertical pull, unless it's been ruled out.
+    const pull = POOL.upper.find((e) => /pull-up/i.test(e.name));
+    const rest = POOL.upper.filter((e) => e !== pull);
+    chosen = pull
+      ? [pull, ...pick(rest, Math.max(1, slots - 1 - coreSlots), seed), ...pick(POOL.core, coreSlots, seed)]
+      : [...pick(POOL.upper, slots - coreSlots, seed), ...pick(POOL.core, coreSlots, seed)];
   } else {
-    const nLower = Math.ceil((slots - 1) / 2);
+    const nLower = Math.ceil((slots - coreSlots) / 2);
     chosen = [
-      ...pick(STRENGTH_POOL.lower, nLower, seed),
-      ...pick(STRENGTH_POOL.upper, slots - 1 - nLower, seed + 1),
-      ...pick(STRENGTH_POOL.core, 1, seed),
+      ...pick(POOL.lower, nLower, seed),
+      ...pick(POOL.upper, slots - coreSlots - nLower, seed + 1),
+      ...pick(POOL.core, coreSlots, seed),
     ];
   }
+  chosen = chosen.filter(Boolean);
   const gear = new Set();
   const lines = chosen.map((ex) => {
     ex.gear.forEach((g) => gear.add(g));
     const dose = /plank|hold|sit|superman/i.test(ex.name)
       ? `${scheme.sets} x ${scheme.holdSec} sec`
       : `${scheme.sets} x ${scheme.reps}`;
+    const sub = substituteName(ex.name, rules);
+    if (sub.swappedFrom) return `${sub.name} — ${dose} (swapped in for ${sub.swappedFrom} at your request)`;
     return `${ex.name} — ${dose} (easier: ${ex.regress} · harder: ${ex.progress})`;
   });
   return {
