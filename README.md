@@ -133,11 +133,21 @@ which is why all of it is covered by tests.
 | "reduce the volume by 20%" | Honours the number you gave |
 | "I ran a 5k PB today, 23:40" | Treats a measured max effort like a test — recalculates every pace |
 | "why is my easy pace so slow" / "what's a deload" | Explains the reasoning, changes nothing |
+| "undo that" / "I logged that wrong" | Reverses the last change. Every coach action is snapshotted first |
+| "that was Tuesday not Monday" / "delete yesterday's log" | Corrects or removes a log |
+| "I'm sick, fever since yesterday" | Stops training. The neck check, explained |
+| "I've got a cold" | Keeps the session, strips the intensity |
+| "I've got a parkrun on Saturday" | Adds the race, protects the days either side |
+| "I'm on holiday for two weeks" | Blocks the span; adherence isn't punished |
+| "just got back after 3 weeks off" | Returns you at reduced volume, not where the plan left off |
+| "I only have a treadmill" / "it's 35 degrees" | Switches to effort only, pace targets off |
+| "I only slept 4 hours" / "big night out" | Cuts load, explains why |
+| "am I getting fitter?" | Measured vs estimated progress, honestly separated |
 | "what am I doing today?" | Answers from your actual plan |
 
 Coverage is measured, not assumed: `probe.html` runs 37 realistic phrasings across
 logging, load, plan changes and exercise changes, and reports what each one resolves to.
-All 37 are understood. Run it whenever you change the parsing.
+All 37 are understood, and `probe-gaps.html` covers a further 35 (illness, races, absence, environment, corrections, safety) — all 35 handled. Run it whenever you change the parsing.
 
 **It says when it hasn't understood**, and offers examples instead of guessing. A coach that
 silently misinterprets you is worse than one that admits the gap.
@@ -161,6 +171,10 @@ so it hands you to the goal editor instead of quietly retargeting your plan. And
 physio: it takes the load off and tells you to get it looked at, but it never diagnoses.
 Describe something sharp, swollen, or worsening and it says plainly that you're past what a
 training plan should be working around.
+
+**Everything is reversible.** Each coach action snapshots the fields it will touch before
+mutating them, so "undo that" always works. The coach changes real state, and a change you
+can't take back is a change you can't trust.
 
 Everything it changes is stored in `coachOverrides` and applied *on top of* the generated
 plan, never baked into it — so every change is reversible by clearing the override, and the
@@ -253,7 +267,7 @@ python3 -m http.server 8000
 ```
 
 Open `http://localhost:8000/index.html?demo=1`. Open `/test.html` to run the engine suite
-(239 checks: VDOT math, plan structure, scheduling, volume ramp, intensity, every adaptation
+(277 checks: VDOT math, plan structure, scheduling, volume ramp, intensity, every adaptation
 rule, derived fitness, schedule history, feasibility, and coverage of every requirement).
 
 It must be served over HTTP — `file://` breaks ES module imports.
@@ -410,5 +424,5 @@ targets) lives in `plan-engine.js`.
 ## Cache-busting
 
 `index.html`, `app.js`, `plan-engine.js`, and `coach.js` carry `?v=` on their imports —
-currently `v=25`.
+currently `v=27`.
 Bump them on every deploy that touches CSS or JS, or phones will serve stale copies for days.

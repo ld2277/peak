@@ -85,7 +85,9 @@ service cloud.firestore {
               && (!('swaps' in request.resource.data.coachOverrides)
                   || request.resource.data.coachOverrides.swaps.size() <= 20)
               && (!('exerciseRules' in request.resource.data.coachOverrides)
-                  || request.resource.data.coachOverrides.exerciseRules is map));
+                  || request.resource.data.coachOverrides.exerciseRules is map)
+              && (!('races' in request.resource.data.coachOverrides)
+                  || request.resource.data.coachOverrides.races.size() <= 10));
     }
 
     // planStart anchors every logged date to a week number. If it could move,
@@ -112,7 +114,7 @@ service cloud.firestore {
                     && request.resource.data.diff(resource.data).affectedKeys()
                          .hasOnly(['logs', 'tests', 'fitness', 'goal', 'schedule',
                                    'scheduleHistory', 'profile', 'changeLog',
-                                   'chat', 'coachOverrides'])
+                                   'chat', 'coachOverrides', 'coachHistory'])
                     && planStartUnchanged()
                     && fitnessAnswersUnchanged()
                     && validGoal(request.resource.data.goal)
@@ -130,6 +132,9 @@ service cloud.firestore {
                         || request.resource.data.scheduleHistory.size() <= 100)
                     && (!('chat' in request.resource.data)
                         || request.resource.data.chat.size() <= 120)
+                    // Undo snapshots. Bounded so history can't grow unchecked.
+                    && (!('coachHistory' in request.resource.data)
+                        || request.resource.data.coachHistory.size() <= 10)
                     && validCoachOverrides();
 
       // You can delete your own plan ("Start a new plan"). Nobody else can.

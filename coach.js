@@ -12,7 +12,7 @@
 import {
   dateKey, parseDateKey, addDays, weekdayIndex, WEEKDAYS, WEEKDAYS_SHORT,
   formatDuration, formatPace, INJURY_FOCUS_LABELS, vdotFromRace,
-} from "./plan-engine.js?v=25";
+} from "./plan-engine.js?v=27";
 
 // ---------------------------------------------------------------- text utils
 
@@ -383,6 +383,60 @@ const NUTRITION_QUESTIONS = [
   " macros", " carb load", " gels", " should i eat", " diet plan", " lose weight",
 ];
 
+// ---------------------------------------------------------------- words
+
+const UNDO_WORDS = [" undo", " revert", " take that back", " ignore what i just said",
+  " ignore that", " scratch that", " never mind that", " cancel that", " reverse that",
+  " put it back", " that was wrong", " logged that wrong", " got that wrong"];
+
+const DELETE_LOG_WORDS = [" delete ", " remove the log", " unlog", " didn't actually",
+  " did not actually", " wasn't me", " clear the log"];
+
+const ILLNESS_SYSTEMIC = [" fever", " temperature", " flu", " covid", " chest infection",
+  " vomiting", " throwing up", " being sick", " diarrhoea", " diarrhea", " body aches",
+  " aching all over", " shivering", " chills", " bronchitis"];
+const ILLNESS_MILD = [" cold", " sniffles", " blocked nose", " runny nose", " sore throat",
+  " head cold", " congested", " stuffy", " bunged up"];
+const ILLNESS_GENERAL = [" sick", " ill ", " unwell", " under the weather", " poorly"];
+const RECOVERED_WORDS = [" feeling better", " over it now", " recovered", " back to normal",
+  " symptom free", " symptom-free", " all clear"];
+
+const ABSENCE_WORDS = [" holiday", " vacation", " away for", " off for", " travelling for",
+  " traveling for", " business trip", " no training for", " can't train for"];
+const RETURN_WORDS = [" just got back", " back after", " returning after", " been off for",
+  " haven't trained in", " haven't run in", " first week back", " coming back after"];
+
+const RACE_ADD_WORDS = [" parkrun", " park run", " got a race", " have a race", " signed up for",
+  " racing on", " race on", " i'm racing", " im racing", " entered a", " doing a race"];
+
+const ENV_TREADMILL = [" treadmill", " dreadmill", " indoors on the"];
+const ENV_TRAIL = [" trails", " trail run", " off-road", " hills and trails", " mountain"];
+const ENV_HEAT = [" degrees", " so hot", " really hot", " heatwave", " boiling", " humid"];
+const ENV_COLD = [" icy", " snow", " freezing out", " black ice"];
+const ENV_NOGYM = [" no gym", " gym is closed", " without a gym", " no gym access"];
+
+const ALCOHOL_WORDS = [" night out", " big night", " hungover", " hangover", " been drinking",
+  " few too many", " heavy weekend", " on the beers"];
+const RACE_CANCEL = [" race got cancelled", " race is cancelled", " race was cancelled",
+  " cancelled the race", " not doing the race", " pulled out of", " race got called off"];
+
+const SLEEP_STRESS = [" slept", " no sleep", " insomnia", " stressed", " stressful",
+  " burnt out", " burned out", " exams", " deadline", " work has been"];
+
+const PROGRESS_Q = [" getting fitter", " am i improving", " progressing", " getting faster",
+  " am i improving", " making progress", " any better than"];
+
+// "in 3 weeks", "in a month", "for two weeks"
+const NUM_WORDS = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
+function parseSpanDays(t) {
+  const m = t.match(/\b(?:in|for|after)\s+(\d+|a|an|one|two|three|four|five|six)\s+(day|days|week|weeks|month|months)\b/);
+  if (!m) return null;
+  const n = /\d/.test(m[1]) ? parseInt(m[1], 10) : (NUM_WORDS[m[1]] || 1);
+  if (/day/.test(m[2])) return n;
+  if (/week/.test(m[2])) return n * 7;
+  return n * 30;
+}
+
 // ---------------------------------------------------------------- intents
 
 // Ordered by priority: pain is checked before anything else, because a plan
@@ -433,6 +487,51 @@ export function coachRespond(message, ctx) {
     };
   }
 
+  // ---- 0d. Undo and log corrections. Early, because these are unambiguous
+  //           and because the coach changes state — there must always be a way
+  //           back that doesn't involve digging through the Profile editors.
+  if (hasAny(t, UNDO_WORDS)) {
+    return {
+      intent: "undo",
+      reply: "Reverted my last change. Everything is back to how it was before that message.",
+      actions: [{ type: "undoLast" }],
+    };
+  }
+
+  const swapDayFix = t.match(/\b(mon|tue|tues|wed|weds|thu|thur|thurs|fri|sat|sun)\w*\s+not\s+(mon|tue|tues|wed|weds|thu|thur|thurs|fri|sat|sun)\w*/);
+  if (swapDayFix) {
+    const idx = { mon: 0, tue: 1, tues: 1, wed: 2, weds: 2, thu: 3, thur: 3, thurs: 3, fri: 4, sat: 5, sun: 6 };
+    const toIdx = idx[swapDayFix[1]], fromIdx = idx[swapDayFix[2]];
+    const base = weekdayIndex(today);
+    const dayFor = (i) => dateKey(addDays(today, i - base <= 0 ? i - base : i - base - 7));
+    return {
+      intent: "moveLog",
+      reply: `Fixed — moved that session from ${WEEKDAYS[fromIdx]} to ${WEEKDAYS[toIdx]}.`,
+      actions: [{ type: "moveLog", from: dayFor(fromIdx), to: dayFor(toIdx) }],
+    };
+  }
+
+  if (hasAny(t, DELETE_LOG_WORDS) && (dates.length || hasAny(t, [" log", " session", " workout"]))) {
+    const key = dates[0] || todayKey;
+    return {
+      intent: "deleteLog",
+      reply: `Removed the log for ${prettyShort(key).toLowerCase()}. Your adherence and fitness estimate recalculate without it.`,
+      actions: [{ type: "deleteLog", dateKey: key }],
+    };
+  }
+
+  // ---- 0e. Illness. Not an injury, and not a motivation problem — it has its
+  //          own rules, and they are stricter than most people expect.
+  const weatherContext = hasAny(t, [" degrees", " outside", " out there", " weather", " forecast"]);
+  const systemic = hasAny(t, ILLNESS_SYSTEMIC);
+  const mild = !weatherContext && hasAny(t, ILLNESS_MILD);
+  if (hasAny(t, RECOVERED_WORDS) && (systemic || mild || hasAny(t, ILLNESS_GENERAL))) {
+    return recoveredResponse({ user });
+  }
+  if (systemic || mild || hasAny(t, ILLNESS_GENERAL)) {
+    return illnessResponse({ t, systemic, mild, today });
+  }
+
   // ---- 1. Pain or injury. Safety first, plan second.
   if (hasAny(t, PAIN_WORDS)) {
     return painResponse({ t, part, user, plan, adaptation, today, todayKey });
@@ -453,6 +552,33 @@ export function coachRespond(message, ctx) {
   const exercises = detectExercises(t);
   const missingGear = detectMissingGear(t);
   const substitution = detectSubstitution(t);
+
+  // ---- 1b. A race or event inside the plan.
+  if (hasAny(t, RACE_CANCEL)) {
+    const races = user.coachOverrides?.races || [];
+    return {
+      intent: "raceRemoved",
+      reply: races.length
+        ? `Taken it out. The days around it go back to normal training, and the block carries on as it was.`
+        : `There's no race in your plan to remove. If you meant a session, tell me which day and I'll clear it.`,
+      actions: races.length ? [{ type: "removeRace", dateKey: races[races.length - 1].dateKey }] : [],
+    };
+  }
+  if (hasAny(t, RACE_ADD_WORDS)) {
+    return raceResponse({ t, dates, today, plan, adaptation });
+  }
+
+  // ---- 1c. A block away, or coming back from one.
+  if (hasAny(t, RETURN_WORDS)) return returningResponse({ t, user });
+  if (hasAny(t, ABSENCE_WORDS)) return absenceResponse({ t, dates, today });
+
+  // ---- 1d. Conditions that mean "run by effort, ignore the pace targets".
+  const envKind = hasAny(t, ENV_TREADMILL) ? "treadmill"
+    : hasAny(t, ENV_TRAIL) ? "trail"
+    : hasAny(t, ENV_HEAT) ? "heat"
+    : hasAny(t, ENV_COLD) ? "cold"
+    : hasAny(t, ENV_NOGYM) ? "nogym" : null;
+  if (envKind) return environmentResponse({ envKind, t, today, plan });
 
   // ---- 2a. Exercise-level changes. Checked early because "I can't do
   //          pull-ups" used to match the availability rules and silently block
@@ -492,12 +618,14 @@ export function coachRespond(message, ctx) {
   // ---- 2d. Add or remove standing sessions. Checked before the "did something
   //          different" branch, because "add a run on Tuesdays" mentions an
   //          activity but is a schedule request, not a session report.
-  const addDays = detectWeekdays(t);
-  if (hasAny(t, ADD_CUES) && (addDays.length || detectAddType(t))) {
-    return addSessionsResponse({ t, weekdays: addDays, type: detectAddType(t), user, plan, adaptation });
+  // Named addWeekdays, not addDays — the latter is the imported date helper and
+  // shadowing it put every later call into the temporal dead zone.
+  const addWeekdays = detectWeekdays(t);
+  if (hasAny(t, ADD_CUES) && (addWeekdays.length || detectAddType(t))) {
+    return addSessionsResponse({ t, weekdays: addWeekdays, type: detectAddType(t), user, plan, adaptation });
   }
-  if (hasAny(t, REMOVE_CUES) && addDays.length) {
-    return removeSessionsResponse({ t, weekdays: addDays, user, plan });
+  if (hasAny(t, REMOVE_CUES) && addWeekdays.length) {
+    return removeSessionsResponse({ t, weekdays: addWeekdays, user, plan });
   }
 
   // ---- 2e. "Did today's session" — the prescribed work, as written.
@@ -535,6 +663,23 @@ export function coachRespond(message, ctx) {
     const ex = explainResponse({ t, plan, adaptation });
     if (ex) return ex;
   }
+
+  // ---- 5b2. Alcohol. Not a moral question — it genuinely blunts recovery, and
+  //            saying so plainly is more useful than pretending otherwise.
+  if (hasAny(t, ALCOHOL_WORDS)) {
+    return {
+      intent: "alcohol",
+      reply: `Keep today easy — or take it off. No judgement, just physiology: alcohol wrecks the deep sleep where most of your adaptation happens, and dehydrates you on top, so a hard session today buys the fatigue without the fitness.\n\nAn easy run will make you feel better than sitting still will. Save the quality work for tomorrow, and drink more water than feels necessary.`,
+      actions: [{ type: "softenDays", days: 1, reason: "post-drinking recovery" }],
+    };
+  }
+
+  // ---- 5c. Sleep and life stress. Same load response as fatigue, but the
+  //           reason matters and the advice is different.
+  if (hasAny(t, SLEEP_STRESS)) return lifeLoadResponse({ t, user, adaptation });
+
+  // ---- 5d. Progress questions.
+  if (hasAny(t, PROGRESS_Q)) return progressResponse({ user, plan, adaptation });
 
   // ---- 6. Feeling wrecked / everything too hard.
   if (hasAny(t, BAD_FEEL) || hasAny(t, LESS_WORDS)) {
@@ -765,6 +910,151 @@ function completedResponse({ t, dates, plan, user, today, todayKey }) {
       session: { type: s.type, minutes: s.minutes, rpe, plannedRpe: s.targetRpe, label: s.label, note: "" },
     }],
   };
+}
+
+function illnessResponse({ t, systemic, mild, today }) {
+  // The above-the-neck rule: symptoms confined to the head are usually fine to
+  // train lightly through; anything systemic is not. Training through a fever
+  // is how people end up with weeks off instead of days.
+  if (systemic) {
+    const until = dateKey(addDays(today, 3));
+    return {
+      intent: "illness",
+      reply: `No training while that's going on. I've cleared the next three days.\n\nThe rule I'd hold you to is the neck check: symptoms above the neck — a blocked nose, a mild sore throat — are usually fine to train lightly through. A fever, chest symptoms, aching all over or anything in your stomach are not. Training through those doesn't just cost you the session, it drags the illness out and occasionally does real damage to your heart.\n\nWhen you're symptom-free for a full day, tell me you're better and I'll bring you back gradually — you'll want to go straight back to normal volume and that's exactly what not to do.`,
+      actions: [{ type: "setIllness", level: "systemic", until }],
+    };
+  }
+  const until = dateKey(addDays(today, 2));
+  return {
+    intent: "illness",
+    reply: `A head cold on its own doesn't have to stop you, but the hard sessions have to go. For the next couple of days everything drops to easy effort — the interval and tempo work is off.\n\nIf it moves to your chest, you get a temperature, or you start aching all over, stop entirely and tell me. Tell me when you're better and I'll build you back up.`,
+    actions: [{ type: "setIllness", level: "mild", until }],
+  };
+}
+
+function recoveredResponse({ user }) {
+  return {
+    intent: "recovered",
+    reply: `Good. I've lifted the illness block and put you back at 80% volume for a few days rather than straight back to full — the first sessions back always feel harder than they should, and that's normal rather than a sign you've lost everything.\n\nIf a session feels much worse than the number on it, stop and tell me. Coming back too fast is the most common way a week off becomes three.`,
+    actions: [{ type: "clearIllness" }, { type: "setLoad", factor: 0.8, reason: "returning from illness" }],
+  };
+}
+
+function raceResponse({ t, dates, today, plan, adaptation }) {
+  const spanDays = parseSpanDays(t);
+  const key = dates[0] || (spanDays ? dateKey(addDays(today, spanDays)) : null);
+  if (!key) {
+    return {
+      intent: "race",
+      reply: `Happy to build that in — when is it? Give me a day ("parkrun on Saturday") or a distance out ("a 10k in three weeks") and I'll taper you into it.`,
+      actions: [],
+    };
+  }
+  const km = detectDistanceKm(t);
+  const isParkrun = hasAny(t, [" parkrun", " park run"]);
+  const meters = isParkrun ? 5000 : km ? Math.round(km * 1000) : 5000;
+  const label = isParkrun ? "parkrun" : `${meters / 1000}K race`;
+  const daysOut = Math.round((parseDateKey(key) - today) / 86400000);
+
+  let reply = `${label.charAt(0).toUpperCase() + label.slice(1)} on ${prettyDate(key)} — in. The day before drops to easy or rest, and the day after is recovery only.`;
+  if (daysOut >= 10) {
+    reply += ` It's far enough out that the block carries on as normal until the last few days, so treat it as a hard workout with a number attached rather than a goal race.`;
+  } else {
+    reply += ` It's close, so I've kept the days around it light rather than trying to squeeze a hard session in.`;
+  }
+  reply += `\n\nTell me the time afterwards and I'll use it the way I'd use a test — it recalculates every pace in your plan.`;
+
+  return { intent: "race", reply, actions: [{ type: "addRace", dateKey: key, meters, label }] };
+}
+
+function absenceResponse({ t, dates, today }) {
+  const days = parseSpanDays(t) || 7;
+  const from = dates[0] ? parseDateKey(dates[0]) : today;
+  const list = [];
+  for (let i = 0; i < Math.min(days, 60); i++) list.push(dateKey(addDays(from, i)));
+
+  const weeks = Math.round(days / 7);
+  let reply = `Blocked out ${days} days from ${prettyDate(dateKey(from))}. Nothing is scheduled in that window and it won't count against your adherence.`;
+  if (weeks >= 3) {
+    reply += `\n\n${weeks} weeks is long enough that you'll lose some fitness — that's just true, and pretending otherwise would set you up to get hurt on the way back. Tell me when you're back and I'll rebuild you rather than dropping you into where the plan thinks you should be.`;
+  } else {
+    reply += `\n\nA week or two off costs far less than people fear. If you can get a couple of easy runs in, good; if not, the plan will be there.`;
+  }
+  return { intent: "absence", reply, actions: [{ type: "blockDates", dates: list, reason: "away" }] };
+}
+
+function returningResponse({ t, user }) {
+  const days = parseSpanDays(t) || 14;
+  const weeks = Math.max(1, Math.round(days / 7));
+  const factor = weeks >= 4 ? 0.6 : weeks >= 2 ? 0.72 : 0.85;
+  return {
+    intent: "returning",
+    reply: `Welcome back. After ${weeks} week${weeks === 1 ? "" : "s"} off I've put you at ${Math.round(factor * 100)}% volume, and I'd hold you there for a fortnight before pushing.\n\nYour engine comes back within a couple of weeks; tendons and bone take considerably longer, and they're what actually breaks when people resume at the volume they left at. Expect the first few sessions to feel much worse than the numbers suggest — that's normal and it passes quickly.\n\nWhen it stops feeling like a fight, tell me and I'll put the volume back.`,
+    actions: [{ type: "setLoad", factor, reason: `returning after ${weeks} weeks off` }],
+  };
+}
+
+function environmentResponse({ envKind, t, today, plan }) {
+  const until = dateKey(addDays(today, 7));
+  const copy = {
+    treadmill: `Treadmill it is. Ignore the pace targets and run to effort — a treadmill's pace readout is its own opinion, and 1% incline roughly offsets the lack of air resistance if you want to match outdoor effort.`,
+    trail: `Trails — run to effort and ignore the pace targets completely. Hills and uneven ground make the same effort far slower, and chasing a road pace off-road is how people end up hammering an easy day.`,
+    heat: `In that heat, effort is the only number that means anything. Expect to be 20–40 sec/km slower for the same effort, and treat that as correct rather than as a bad day. Start slower than feels right, and if a hard session falls apart, bin it rather than fighting it.`,
+    cold: `On ice, forget the paces and the session structure — getting round safely is the whole objective. Shorten your stride, and if it's genuinely treacherous, move the session indoors or take the day.`,
+    nogym: `No gym, no problem — every strength session in your plan is already bodyweight-first, with a band or a step as the only optional extras. Nothing is lost.`,
+  };
+  const actions = envKind === "nogym" ? [] : [{ type: "setEffortOnly", until, reason: envKind }];
+  return { intent: "environment", reply: copy[envKind], actions };
+}
+
+function lifeLoadResponse({ t, user, adaptation }) {
+  const current = user.coachOverrides?.loadFactor ?? 1;
+  const next = Math.max(0.7, Math.round((current - 0.12) * 100) / 100);
+  const isSleep = hasAny(t, [" slept", " sleep", " insomnia"]);
+  return {
+    intent: "lifeLoad",
+    reply: isSleep
+      ? `Volume down to ${Math.round(next * 100)}% while sleep is bad.\n\nSleep is where training actually turns into fitness, so a hard session on four hours buys you the fatigue without the adaptation. If you only get one thing right this week, make it the easy days being genuinely easy — and if you have to choose between a session and an hour in bed, take the bed.`
+      : `Volume down to ${Math.round(next * 100)}% while things are heavy.\n\nYour body doesn't distinguish between training stress and life stress — it's one bucket, and a hard block during a hard month is how people get ill rather than fit. Training less right now isn't losing ground; it's the reason you'll still be doing this in a month.`,
+    actions: [{ type: "setLoad", factor: next, reason: isSleep ? "poor sleep" : "life stress" }],
+  };
+}
+
+function progressResponse({ user, plan, adaptation }) {
+  const f = adaptation.fitness;
+  const start = f.timeline[0]?.vdot ?? f.vdot;
+  const delta = f.vdot - start;
+  const logged = Object.values(user.logs || {}).filter((l) => l.done).length;
+  const tests = Object.values(user.tests || {}).filter((x) => x.seconds);
+
+  let reply = `You've logged ${logged} session${logged === 1 ? "" : "s"} and you're in week ${adaptation.currentWeek} of ${plan.totalWeeks}.\n\n`;
+
+  if (tests.length >= 2) {
+    const first = tests[0], last = tests[tests.length - 1];
+    if (first.meters === last.meters) {
+      const gain = first.seconds - last.seconds;
+      reply += gain > 0
+        ? `Measured: ${formatDuration(gain)} faster over ${last.meters / 1000}K between your first test and your last. That's real, not an estimate.`
+        : `Measured: your last test was ${formatDuration(-gain)} slower than your first. One test is a bad day; two in a row is a pattern worth acting on.`;
+    } else {
+      reply += `You've got ${tests.length} measured results in. Your fitness score sits at ${f.vdot.toFixed(1)}.`;
+    }
+  } else if (tests.length === 1) {
+    reply += `One measured result so far, and your fitness sits at ${f.vdot.toFixed(1)}. Your next test week is the one that will tell you whether the block worked.`;
+  } else {
+    reply += `Nothing measured yet, so ${f.vdot.toFixed(1)} is still an estimate off your training. Your first test week turns that into a real number.`;
+  }
+
+  reply += `\n\n${delta > 0.5
+    ? `The estimate has moved up ${delta.toFixed(1)} points since you started, which is what consistent weeks look like.`
+    : delta < -0.5
+      ? `The estimate has drifted down ${Math.abs(delta).toFixed(1)} points — that's missed sessions rather than lost ability, and it comes back quickly.`
+      : `It's held steady, which early in a block is normal — fitness lags training by a few weeks.`}`;
+
+  if (plan.paces) {
+    reply += `\n\nEasy ${formatPace(plan.paces.easy)} · tempo ${formatPace(plan.paces.threshold)} · intervals ${formatPace(plan.paces.interval)}.`;
+  }
+  return { intent: "progress", reply, actions: [] };
 }
 
 function addSessionsResponse({ t, weekdays, type, user, plan, adaptation }) {

@@ -31,8 +31,8 @@ import {
   feasibilityReport, achievableVdotGain, EVENT_REQUIREMENTS,
   deriveFitness, sessionsScheduledForWeek, baselineVdot, parseDateKey,
   pruneCoachOverrides,
-} from "./plan-engine.js?v=25";
-import { coachRespond } from "./coach.js?v=25";
+} from "./plan-engine.js?v=27";
+import { coachRespond } from "./coach.js?v=27";
 
 const out = document.getElementById("out");
 let pass = 0, fail = 0;
@@ -856,6 +856,94 @@ check("A steady training run is NOT treated as a test",
   "an easy run must not reset training paces");
 check("A pace is never mistaken for a result time",
   !say("ran 40 min at 5:41/km").actions.some((a) => a.type === "recordResult"));
+
+section("Coach — illness");
+const rFlu = say("I'm sick, fever since yesterday");
+check("Systemic illness stops training", rFlu.actions.some((a) => a.type === "setIllness" && a.level === "systemic"), rFlu.intent);
+check("It explains the neck check", /neck check|above the neck/i.test(rFlu.reply));
+const rCold = say("I've got a cold");
+check("A head cold eases rather than stops", rCold.actions.some((a) => a.type === "setIllness" && a.level === "mild"));
+check("Weather is not mistaken for illness",
+  say("it's cold out there, 2 degrees").intent === "environment",
+  say("it's cold out there, 2 degrees").intent);
+check("Recovery ramps back rather than resuming at full",
+  say("feeling better now, over the cold").actions.some((a) => a.type === "setLoad" && a.factor < 1));
+
+function planWithOverrides(co) {
+  const uu = mkUser(); uu.planStart = dateKey(monday); uu.coachOverrides = co;
+  return buildPlan(uu, computeAdaptation(uu));
+}
+const illPlan = planWithOverrides({ illness: { level: "systemic", until: dateKey(addDays(monday, 3)) } });
+check("Systemic illness clears the days entirely",
+  illPlan.weeks[0].days.slice(0, 4).every((d) => d.isRest));
+check("Days after the illness window are untouched",
+  illPlan.weeks[1].days.some((d) => !d.isRest));
+const mildPlan = planWithOverrides({ illness: { level: "mild", until: dateKey(addDays(monday, 3)) } });
+check("A head cold keeps sessions but strips the intensity",
+  mildPlan.weeks[0].days.filter((d) => d.session?.illnessEased).every((d) => d.session.targetRpe === 4));
+
+section("Coach — races");
+const rRace = say("I've got a parkrun on Saturday");
+check("A race is added", rRace.actions.some((a) => a.type === "addRace"), rRace.intent);
+check("parkrun is read as 5K", rRace.actions[0].meters === 5000, String(rRace.actions[0].meters));
+check("A race weeks out is scheduled from the span",
+  say("I signed up for a 10k in 3 weeks").actions.some((a) => a.type === "addRace"));
+const racePlan = planWithOverrides({ races: [{ dateKey: dateKey(addDays(monday, 5)), meters: 5000, label: "parkrun" }] });
+const raceDay = racePlan.weeks[0].days.find((d) => d.session?.isRace);
+check("The race replaces that day's session", !!raceDay, "no race session found");
+check("The day before a race is protected",
+  racePlan.weeks[0].days[4].isRest, "the day before must be easy or rest");
+check("A cancelled race is removed",
+  coachRespond("my race got cancelled", {
+    user: { ...mkUser(), planStart: dateKey(monday), coachOverrides: { races: [{ dateKey: dateKey(addDays(monday, 5)), meters: 5000 }] } },
+    plan, adaptation: a, today: monday,
+  }).actions.some((x) => x.type === "removeRace"));
+
+section("Coach — absence and returning");
+check("A holiday blocks the whole span",
+  say("I'm on holiday for two weeks").actions[0].dates.length === 14,
+  String(say("I'm on holiday for two weeks").actions[0].dates.length));
+check("Coming back drops the volume",
+  say("just got back after 3 weeks off").actions.some((x) => x.type === "setLoad" && x.factor <= 0.72));
+check("A longer absence drops it further",
+  say("just got back after 3 weeks off").actions[0].factor <
+  say("back after 1 week off").actions[0].factor);
+check("It is honest about losing fitness", /lose some fitness|rebuild/i.test(say("I'm on holiday for a month").reply));
+
+section("Coach — environment");
+check("Treadmill switches to effort only", say("I only have a treadmill").actions.some((x) => x.type === "setEffortOnly"));
+check("Heat switches to effort only", say("it's 35 degrees out").actions.some((x) => x.type === "setEffortOnly"));
+check("No gym needs no change at all", say("no gym access this week").actions.length === 0);
+const effPlan = planWithOverrides({ effortOnly: { until: dateKey(addDays(monday, 5)), reason: "treadmill" } });
+const effRun = effPlan.weeks[0].days.find((d) => d.session?.effortOnly);
+check("Pace targets are stripped from run sessions", !!effRun && !effRun.session.lines.some((l) => /\(about /.test(l)));
+check("And it says to run by effort", !!effRun && /Effort only/i.test(effRun.session.lines[0]));
+
+section("Coach — sleep, stress, alcohol");
+check("Bad sleep reduces load", say("I only slept 4 hours").actions.some((x) => x.type === "setLoad" && x.factor < 1));
+check("And explains why sleep matters", /adaptation|deep sleep|bed/i.test(say("I only slept 4 hours").reply));
+check("Stress reduces load", say("I'm really stressed out").actions.some((x) => x.type === "setLoad"));
+check("Stress advice names the shared bucket", /one bucket|life stress/i.test(say("work has been brutal this month").reply));
+check("A heavy night softens the day without moralising",
+  say("big night out yesterday").actions.some((x) => x.type === "softenDays"));
+check("It stays non-judgemental", /no judgement/i.test(say("big night out yesterday").reply));
+
+section("Coach — progress");
+const rProg = say("am I getting fitter");
+check("Progress questions are answered", rProg.intent === "progress", rProg.intent);
+check("They change nothing", rProg.actions.length === 0);
+check("They distinguish measured from estimated", /estimate|measured/i.test(rProg.reply));
+check("With no test yet, it says so", /Nothing measured yet|estimate/i.test(rProg.reply));
+
+section("Coach — undo is always available");
+check("'undo that' produces an undo action", say("undo that").actions.some((x) => x.type === "undoLast"));
+check("'I logged that wrong' undoes too", say("I logged that wrong").intent === "undo");
+check("A wrong day can be corrected",
+  say("that was Tuesday not Monday").actions.some((x) => x.type === "moveLog"), say("that was Tuesday not Monday").intent);
+check("A log can be deleted outright",
+  say("delete yesterday's log").actions.some((x) => x.type === "deleteLog"));
+check("Undo never carries other side effects",
+  say("undo that").actions.length === 1);
 
 section("Sample week output");
 u = mkUser(); a = computeAdaptation(u); plan = buildPlan(u, a);

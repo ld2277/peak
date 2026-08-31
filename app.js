@@ -2,7 +2,7 @@
 // Cache-busting: bump ?v= here and in index.html on every deploy that changes
 // app.js, plan-engine.js, workouts.js, or style.css.
 
-import { firebaseConfig } from "./firebase-config.js?v=25";
+import { firebaseConfig } from "./firebase-config.js?v=27";
 import {
   WORKOUT_FREQ, CARDIO_FREQ, RUN_DURATION, INJURY_FOCUS_LABELS,
   WEEKDAYS, WEEKDAYS_SHORT, COMMITMENT_LOADS, SESSION_COUNTS, SESSION_MINUTES,
@@ -11,9 +11,9 @@ import {
   formatDuration, formatPace, paceToMile, parseTimeToSeconds,
   buildPlan, getWeek, getDayForDate, computeAdaptation, goalAssessment,
   feasibilityReport, deriveFitness, pruneCoachOverrides,
-} from "./plan-engine.js?v=25";
-import { RPE_SCALE, GEAR_LABELS } from "./workouts.js?v=25";
-import { coachRespond } from "./coach.js?v=25";
+} from "./plan-engine.js?v=27";
+import { RPE_SCALE, GEAR_LABELS } from "./workouts.js?v=27";
+import { coachRespond } from "./coach.js?v=27";
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
@@ -1553,7 +1553,60 @@ const QUICK_PROMPTS = [
 
 // Turns the coach's structured actions into stored state. The coach decides
 // what should change; this is the only place anything actually changes.
+// Captures just enough to reverse the next set of actions. Only the fields
+// those actions can touch are snapshotted, so history stays small.
+function snapshotFor(actions) {
+  const snap = { coachOverrides: JSON.parse(JSON.stringify(user.coachOverrides || {})) };
+  const types = actions.map((a) => a.type);
+  if (types.some((x) => ["logActual", "deleteLog", "moveLog"].includes(x))) {
+    snap.logs = {};
+    for (const a of actions) {
+      for (const k of [a.dateKey, a.from, a.to].filter(Boolean)) snap.logs[k] = user.logs?.[k] ?? null;
+    }
+  }
+  if (types.includes("recordResult")) snap.tests = JSON.parse(JSON.stringify(user.tests || {}));
+  if (types.includes("setSchedule")) {
+    snap.schedule = { ...user.schedule };
+    snap.scheduleHistory = [...(user.scheduleHistory || [])];
+  }
+  if (types.includes("addInjuryFocus")) snap.profile = { ...user.profile };
+  return snap;
+}
+
+async function undoLastChange() {
+  const hist = [...(user.coachHistory || [])];
+  const last = hist.pop();
+  if (!last) return false;
+
+  const patch = {};
+  if (last.snap.coachOverrides) { user.coachOverrides = last.snap.coachOverrides; patch.coachOverrides = last.snap.coachOverrides; }
+  if (last.snap.schedule) { user.schedule = last.snap.schedule; patch.schedule = last.snap.schedule; }
+  if (last.snap.scheduleHistory) { user.scheduleHistory = last.snap.scheduleHistory; patch.scheduleHistory = last.snap.scheduleHistory; }
+  if (last.snap.profile) { user.profile = last.snap.profile; patch.profile = last.snap.profile; }
+  if (last.snap.tests) { user.tests = last.snap.tests; patch.tests = last.snap.tests; }
+  if (last.snap.logs) {
+    user.logs = { ...(user.logs || {}) };
+    for (const [k, v] of Object.entries(last.snap.logs)) {
+      if (v === null) delete user.logs[k]; else user.logs[k] = v;
+    }
+    patch.logs = user.logs;
+  }
+  user.coachHistory = hist;
+  patch.coachHistory = hist;
+  await persistDoc(patch);
+  return true;
+}
+
 async function applyCoachActions(actions) {
+  if (actions.some((a) => a.type === "undoLast")) {
+    const ok = await undoLastChange();
+    return ok;
+  }
+
+  // Snapshot before anything mutates, so "undo that" always works.
+  const reversible = actions.filter((a) => a.type !== "openGoalEditor");
+  const snap = reversible.length ? snapshotFor(reversible) : null;
+
   const patch = {};
   const co = { ...(user.coachOverrides || {}) };
   let touchedOverrides = false;
@@ -1618,6 +1671,50 @@ async function applyCoachActions(actions) {
       touchedOverrides = true;
     }
 
+    else if (a.type === "deleteLog") {
+      if (user.logs?.[a.dateKey]) {
+        delete user.logs[a.dateKey];
+        patch.logs = user.logs;
+        touchedLogs = true;
+      }
+    }
+
+    else if (a.type === "moveLog") {
+      const entry = user.logs?.[a.from];
+      if (entry) {
+        user.logs = { ...user.logs, [a.to]: entry };
+        delete user.logs[a.from];
+        patch.logs = user.logs;
+        touchedLogs = true;
+      }
+    }
+
+    else if (a.type === "setIllness") {
+      co.illness = { level: a.level, until: a.until };
+      touchedOverrides = true;
+    }
+
+    else if (a.type === "clearIllness") {
+      delete co.illness;
+      touchedOverrides = true;
+    }
+
+    else if (a.type === "addRace") {
+      co.races = [...(co.races || []).filter((r) => r.dateKey !== a.dateKey),
+                  { dateKey: a.dateKey, meters: a.meters, label: a.label }].slice(-10);
+      touchedOverrides = true;
+    }
+
+    else if (a.type === "removeRace") {
+      co.races = (co.races || []).filter((r) => r.dateKey !== a.dateKey);
+      touchedOverrides = true;
+    }
+
+    else if (a.type === "setEffortOnly") {
+      co.effortOnly = { until: a.until, reason: a.reason };
+      touchedOverrides = true;
+    }
+
     else if (a.type === "recordResult") {
       // Stored alongside test results so the derived fitness picks it up —
       // a measured maximal effort is exactly what a test week produces.
@@ -1676,6 +1773,10 @@ async function applyCoachActions(actions) {
   if (touchedOverrides) {
     user.coachOverrides = co;
     patch.coachOverrides = co;
+  }
+  if (snap) {
+    user.coachHistory = [...(user.coachHistory || []), { at: Date.now(), snap }].slice(-10);
+    patch.coachHistory = user.coachHistory;
   }
   if (Object.keys(patch).length) await persistDoc(patch);
   return touchedOverrides || touchedLogs || Object.keys(patch).length > 0;
@@ -1763,6 +1864,14 @@ async function sendToCoach() {
       if (a.type === "swapDays") changes.push("Days swapped");
       if (a.type === "setSchedule") changes.push("Schedule updated");
       if (a.type === "recordResult") changes.push("Fitness recalculated");
+      if (a.type === "setIllness") changes.push("Training paused");
+      if (a.type === "clearIllness") changes.push("Back training");
+      if (a.type === "addRace") changes.push("Race added");
+      if (a.type === "removeRace") changes.push("Race removed");
+      if (a.type === "setEffortOnly") changes.push("Effort only");
+      if (a.type === "deleteLog") changes.push("Log removed");
+      if (a.type === "moveLog") changes.push("Log moved");
+      if (a.type === "undoLast") changes.push("Undone");
       if (a.type === "addInjuryFocus") changes.push("Prehab added");
     }
 

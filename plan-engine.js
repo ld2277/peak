@@ -5,7 +5,7 @@
 import {
   WARMUPS, COOLDOWNS, strengthBlock, conditioningBlock, prehabBlock,
   MOBILITY_FLOW, INJURY_FOCUS_LABELS,
-} from "./workouts.js?v=25";
+} from "./workouts.js?v=27";
 
 export { INJURY_FOCUS_LABELS };
 
@@ -585,6 +585,74 @@ function applyCoachOverrides(dayEntries, user, makeSession, weekNum) {
       d.extraSession = makeSession(extra.type);
       d.extraSession.addedByCoach = true;
       d.addedByCoach = true;
+    }
+  }
+
+  // 3b. Illness. Systemic symptoms clear the day entirely; a head cold keeps
+  //     the session but strips the intensity out of it.
+  if (co.illness?.until) {
+    const until = parseDateKey(co.illness.until);
+    for (const d of dayEntries) {
+      if (d.date > until || !d.session) continue;
+      if (co.illness.level === "systemic") {
+        d.session = null;
+        d.isRest = true;
+        d.illnessCleared = true;
+      } else if (["intervals", "tempo", "test", "conditioning"].includes(d.session.type)) {
+        d.session.label = `${d.session.label} — easy only`;
+        d.session.targetRpe = 4;
+        d.session.lines = [
+          `🤧 Coach swap: you're under the weather, so the hard work is off. Run this easy — ${Math.round(d.session.minutes * 0.7)} min at RPE 4, and stop early if it feels worse than that.`,
+        ];
+        d.session.illnessEased = true;
+      }
+    }
+  }
+
+  // 3c. Races. The race replaces the day, and the days either side are protected.
+  for (const race of co.races || []) {
+    const d = byKey[race.dateKey];
+    if (!d || !makeSession) continue;
+    d.session = {
+      type: "race",
+      label: race.label ? race.label.toUpperCase() : "RACE",
+      minutes: Math.max(40, Math.round((race.meters || 5000) / 1000 * 6) + 25),
+      targetRpe: 10,
+      gear: ["shoes", "timer"],
+      lines: [
+        `Warm-up: 10 min easy jog, leg swings, 4 x 20 sec strides, then 3 min walk`,
+        `Race: ${(race.meters || 5000) / 1000} km. Go out slower than feels right — the first kilometre is the one everyone gets wrong.`,
+        `Cool-down: 10 min very easy jog or walk`,
+        `Tell the coach your time afterwards and every pace in your plan recalculates off it.`,
+      ],
+      isRace: true,
+    };
+    d.isRest = false;
+
+    // Protect the day before and the day after.
+    const before = byKey[dateKey(addDays(d.date, -1))];
+    if (before && before.session && !before.session.isRace) {
+      before.session = null; before.isRest = true; before.raceTaper = "before";
+    }
+    const after = byKey[dateKey(addDays(d.date, 1))];
+    if (after && after.session && !after.session.isRace &&
+        ["intervals", "tempo", "long", "test"].includes(after.session.type)) {
+      after.session = null; after.isRest = true; after.raceTaper = "after";
+    }
+  }
+
+  // 3d. Conditions where pace targets are meaningless — run to effort instead.
+  if (co.effortOnly?.until) {
+    const until = parseDateKey(co.effortOnly.until);
+    for (const d of dayEntries) {
+      if (d.date > until || !d.session) continue;
+      if (!RUN_TYPES.has(d.session.type)) continue;
+      d.session.lines = d.session.lines.map((l) => l.replace(/\s*\(about [^)]*\)/g, ""));
+      d.session.lines = [
+        `🌡️ Effort only: pace targets are off while you're ${co.effortOnly.reason === "treadmill" ? "on the treadmill" : co.effortOnly.reason === "trail" ? "on trails" : `in the ${co.effortOnly.reason}`}. Run the RPE, not the number.`,
+        ...d.session.lines,
+      ];
+      d.session.effortOnly = true;
     }
   }
 
