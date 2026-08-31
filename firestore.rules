@@ -69,6 +69,19 @@ service cloud.firestore {
               && request.resource.data.fitness.vdot <= 80);
     }
 
+    // Adjustments the coach made in conversation. Bounded so the load factor
+    // can't be pushed to an absurd value by anything other than the app.
+    function validCoachOverrides() {
+      return !('coachOverrides' in request.resource.data.diff(resource.data).affectedKeys())
+          || (request.resource.data.coachOverrides is map
+              && (!('loadFactor' in request.resource.data.coachOverrides)
+                  || (request.resource.data.coachOverrides.loadFactor is number
+                      && request.resource.data.coachOverrides.loadFactor >= 0.5
+                      && request.resource.data.coachOverrides.loadFactor <= 1.5))
+              && (!('blockedDates' in request.resource.data.coachOverrides)
+                  || request.resource.data.coachOverrides.blockedDates.size() <= 200));
+    }
+
     // planStart anchors every logged date to a week number. If it could move,
     // the entire training history would silently re-index.
     function planStartUnchanged() {
@@ -92,7 +105,8 @@ service cloud.firestore {
       allow update: if isOwner(userId)
                     && request.resource.data.diff(resource.data).affectedKeys()
                          .hasOnly(['logs', 'tests', 'fitness', 'goal', 'schedule',
-                                   'scheduleHistory', 'profile', 'changeLog'])
+                                   'scheduleHistory', 'profile', 'changeLog',
+                                   'chat', 'coachOverrides'])
                     && planStartUnchanged()
                     && fitnessAnswersUnchanged()
                     && validGoal(request.resource.data.goal)
@@ -107,7 +121,10 @@ service cloud.firestore {
                     && (!('changeLog' in request.resource.data)
                         || request.resource.data.changeLog.size() <= 200)
                     && (!('scheduleHistory' in request.resource.data)
-                        || request.resource.data.scheduleHistory.size() <= 100);
+                        || request.resource.data.scheduleHistory.size() <= 100)
+                    && (!('chat' in request.resource.data)
+                        || request.resource.data.chat.size() <= 120)
+                    && validCoachOverrides();
 
       // You can delete your own plan ("Start a new plan"). Nobody else can.
       allow delete: if isOwner(userId);

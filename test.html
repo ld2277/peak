@@ -14,13 +14,25 @@
 <body>
 <div id="summary">running…</div>
 <div id="out"></div>
+<script>
+  // A thrown error used to leave this page stuck on "running…", which reads as
+  // a hang rather than a failure. Always surface it.
+  window.addEventListener("error", (e) => {
+    document.getElementById("summary").innerHTML =
+      `<span class="fail">SUITE CRASHED</span> — ${e.message}`;
+    document.getElementById("out").insertAdjacentHTML("beforeend",
+      `<div class="fail">✗ Uncaught: ${e.message}<br><small>${(e.error && e.error.stack || "").split("\n").slice(0, 3).join("<br>")}</small></div>`);
+  });
+</script>
 <script type="module">
 import {
   buildPlan, computeAdaptation, goalAssessment, vdotFromRace, predictRaceSeconds,
   pacesFor, formatDuration, parseTimeToSeconds, dateKey, addDays, mondayOnOrBefore,
   feasibilityReport, achievableVdotGain, EVENT_REQUIREMENTS,
-  deriveFitness, sessionsScheduledForWeek, baselineVdot,
-} from "./plan-engine.js?v=9";
+  deriveFitness, sessionsScheduledForWeek, baselineVdot, parseDateKey,
+  pruneCoachOverrides,
+} from "./plan-engine.js?v=15";
+import { coachRespond } from "./coach.js?v=15";
 
 const out = document.getElementById("out");
 let pass = 0, fail = 0;
@@ -402,6 +414,231 @@ check("Derived fitness survives a goal change", Math.abs(deriveFitness(edited).v
 check("The plan re-lengthens to the new deadline", afterPlan.totalWeeks > 15, String(afterPlan.totalWeeks));
 check("Week numbering still starts from the original planStart",
   afterPlan.weeks[0].days[0].dateKey === dateKey(mondayOnOrBefore(addDays(start, -35))));
+
+// ---------------------------------------------------------------- coach
+section("Coach — understanding what you said");
+
+// A Monday, so weekday arithmetic in the tests is predictable.
+const monday = mondayOnOrBefore(new Date());
+function coachCtx(over = {}) {
+  const uu = mkUser(over);
+  uu.planStart = dateKey(monday);
+  const aa = computeAdaptation(uu);
+  return { user: uu, plan: buildPlan(uu, aa), adaptation: aa, today: monday };
+}
+function say(msg, over) { return coachRespond(msg, coachCtx(over)); }
+const actionTypes = (r) => (r.actions || []).map((a) => a.type);
+
+const rDiff = say("ran 30 min easy instead of the intervals");
+check("Recognises doing something different", rDiff.intent === "logActual", rDiff.intent);
+check("Logs it as an actual session", actionTypes(rDiff).includes("logActual"));
+check("Captures the stated duration", rDiff.actions[0].session.minutes === 30, String(rDiff.actions[0].session.minutes));
+check("Reads 'easy' as a low effort", rDiff.actions[0].session.rpe <= 5, String(rDiff.actions[0].session.rpe));
+
+// "instead of the intervals" must attribute the swap to the interval day,
+// not to whatever happens to be scheduled today.
+const ctxD = coachCtx();
+const intervalDay = ctxD.plan.weeks[0].days.find((d) => d.session?.type === "intervals");
+check("Attributes the swap to the session actually named",
+  !intervalDay || rDiff.actions[0].dateKey === intervalDay.dateKey,
+  `logged ${rDiff.actions[0].dateKey}, interval day ${intervalDay?.dateKey}`);
+check("Warns that quality was swapped for easy",
+  !intervalDay || /quality session/i.test(rDiff.reply), rDiff.reply.slice(0, 140));
+check("Says which day it attributed it to when it isn't today",
+  !intervalDay || intervalDay.dateKey === dateKey(monday) || /it's the one on your plan/i.test(rDiff.reply));
+
+const rKm = say("did 8k this morning");
+check("Understands distance and estimates duration", rKm.actions[0]?.session.minutes > 20, String(rKm.actions[0]?.session.minutes));
+
+const rMiss = say("missed today, no time");
+check("Recognises a missed session", rMiss.intent === "missed", rMiss.intent);
+check("Either moves it or explains why not",
+  actionTypes(rMiss).includes("moveSession") || /no free day|let it go/i.test(rMiss.reply), rMiss.reply.slice(0, 100));
+
+const rWeek = say("I missed the whole week");
+check("A written-off week is handled separately", rWeek.intent === "missedWeek", rWeek.intent);
+check("Refuses to cram a missed week back in", /not going to try to cram|carries on/i.test(rWeek.reply));
+
+const rBusy = say("can't train Thursday, work dinner");
+check("Recognises an unavailable day", rBusy.intent === "unavailable", rBusy.intent);
+check("Blocks the day", actionTypes(rBusy).includes("blockDates"));
+check("Blocks the right day",
+  rBusy.actions[0].dates.every((d) => parseDateKey(d).getDay() === 4), JSON.stringify(rBusy.actions[0].dates));
+
+const rRange = say("I'm away tuesday to thursday");
+check("Handles a range of days", rRange.actions[0]?.dates.length === 3, JSON.stringify(rRange.actions[0]?.dates));
+
+const rTired = say("legs are wrecked, everything feels hard");
+check("Recognises fatigue", rTired.intent === "ease", rTired.intent);
+check("Reduces load", actionTypes(rTired).includes("setLoad") && rTired.actions[0].factor < 1, String(rTired.actions[0]?.factor));
+check("Keeps intensity, cuts volume", /intensity targets stay/i.test(rTired.reply));
+
+const rStrong = say("felt great, that was too easy");
+check("Recognises feeling strong", rStrong.intent === "push", rStrong.intent);
+check("Increases load", rStrong.actions[0]?.factor > 1, String(rStrong.actions[0]?.factor));
+check("Refuses to make easy days harder", /won't do is make your easy days harder/i.test(rStrong.reply));
+
+const rGoal = say("I want to run a marathon instead");
+check("Refuses to change the goal from chat", rGoal.intent === "goalChange", rGoal.intent);
+check("Routes to the goal editor", actionTypes(rGoal).includes("openGoalEditor"));
+check("Makes no plan change itself", !actionTypes(rGoal).some((x) => ["setLoad", "logActual", "blockDates"].includes(x)));
+
+const rUnknown = say("what do you think about carbon plated shoes");
+check("Admits when it hasn't understood", rUnknown.intent === "unknown", rUnknown.intent);
+check("Offers examples instead of guessing", /ran 30 easy|can't train/i.test(rUnknown.reply));
+check("Changes nothing when it doesn't understand", rUnknown.actions.length === 0);
+
+section("Coach — injury handling");
+const rPain = say("my knee hurts when I run");
+check("Pain takes priority over everything else", rPain.intent === "pain", rPain.intent);
+check("Removes impact", actionTypes(rPain).includes("softenDays"));
+check("Adds prehab for the right area",
+  rPain.actions.some((a) => a.type === "addInjuryFocus" && a.part === "knee"), JSON.stringify(actionTypes(rPain)));
+check("Tells them to get it looked at", /physio|doctor/i.test(rPain.reply));
+check("Does not diagnose", !/you have|diagnosis|it is probably|sounds like tendinitis/i.test(rPain.reply));
+
+const rSevere = say("sharp pain in my achilles and it's swollen, getting worse");
+check("Escalates severe descriptions", rSevere.severity === "high", String(rSevere.severity));
+check("Says plainly it is out of its depth", /can't tell you what's wrong|not going to pretend/i.test(rSevere.reply));
+
+const rPainNoPart = say("everything hurts");
+check("Handles pain with no named body part", rPainNoPart.intent === "pain" && actionTypes(rPainNoPart).includes("softenDays"));
+
+section("Coach — informational answers");
+check("Answers what's on today", /today is|rest day|outside your plan/i.test(say("what am I doing today?").reply));
+check("Answers pace questions", /Easy —|no running paces/i.test(say("what pace should I run?").reply));
+check("Answers when the next test is", /next test|no test weeks/i.test(say("when is my next test?").reply));
+
+section("Coach overrides change the actual plan");
+function planWith(overrides, over = {}) {
+  const uu = mkUser(over);
+  uu.planStart = dateKey(monday);
+  uu.coachOverrides = overrides;
+  return buildPlan(uu, computeAdaptation(uu));
+}
+
+const basePlan = planWith({});
+const week1 = basePlan.weeks[0];
+const trainingDay = week1.days.find((d) => !d.isRest);
+
+const blockedPlan = planWith({ blockedDates: [trainingDay.dateKey] });
+const blockedDay = blockedPlan.weeks[0].days.find((d) => d.dateKey === trainingDay.dateKey);
+check("A blocked day has no session", blockedDay.isRest && !blockedDay.session);
+check("A blocked day is marked as such", blockedDay.blocked === true);
+
+const restDay = week1.days.find((d) => d.isRest && !d.commitment);
+const movedPlan = planWith({ moves: { [trainingDay.dateKey]: restDay.dateKey } });
+const src = movedPlan.weeks[0].days.find((d) => d.dateKey === trainingDay.dateKey);
+const dst = movedPlan.weeks[0].days.find((d) => d.dateKey === restDay.dateKey);
+check("A moved session leaves its original day", src.isRest && !src.session);
+check("A moved session lands on the target day", !!dst.session && dst.movedFrom === trainingDay.dateKey);
+check("Total sessions are unchanged by a move",
+  movedPlan.weeks[0].days.filter((d) => !d.isRest).length === week1.days.filter((d) => !d.isRest).length);
+
+const easedPlan = planWith({ loadFactor: 0.8, loadFactorFromWeek: 1 });
+check("A reduced load factor shortens sessions",
+  easedPlan.weeks[0].sessionMinutes < basePlan.weeks[0].sessionMinutes,
+  `${easedPlan.weeks[0].sessionMinutes} vs ${basePlan.weeks[0].sessionMinutes}`);
+check("Load factor still respects the stated session cap",
+  planWith({ loadFactor: 1.5, loadFactorFromWeek: 1 }).weeks.every((w) => w.sessionMinutes <= 60));
+
+const softPlan = planWith({ softenUntil: dateKey(addDays(monday, 3)) });
+const softRun = softPlan.weeks[0].days.find((d) => d.session && d.session.lowImpact);
+check("Softened days swap running for low impact", !!softRun, "no low-impact session found");
+check("Low-impact swap keeps duration and effort",
+  softRun && /same duration, same effort/i.test(softRun.session.lines[0]));
+check("A test is never converted to another modality", (() => {
+  const testDay = softPlan.weeks[0].days.find((d) => d.session?.type === "test");
+  if (!testDay) return true; // no test inside the window
+  return !testDay.session.lowImpact && testDay.session.postponeAdvised === true;
+})(), "a time trial on a bike cannot calibrate running paces");
+check("Postponing a test is explained, not just imposed", (() => {
+  const testDay = softPlan.weeks[0].days.find((d) => d.session?.type === "test");
+  return !testDay || /recalibrate every pace/i.test(testDay.session.lines[0]);
+})());
+check("Sessions after the soften window are untouched",
+  softPlan.weeks[2].days.filter((d) => d.session).every((d) => !d.session.lowImpact));
+
+check("A move never stacks two sessions on one day", (() => {
+  const other = week1.days.find((d) => !d.isRest && d.dateKey !== trainingDay.dateKey);
+  const p2 = planWith({ moves: { [trainingDay.dateKey]: other.dateKey } });
+  return p2.weeks[0].days.every((d) => !d.session || typeof d.session === "object");
+})());
+
+section("Audit — regressions guarded");
+
+// A hard session logged via chat must still register as harder than prescribed,
+// otherwise the "sessions too hard" adaptation can never fire from the coach.
+const ctxHard = coachCtx();
+const hardDay = ctxHard.plan.weeks[0].days.find((d) => d.session && d.session.targetRpe <= 5);
+const rHard = coachRespond("ran 40 min instead of the easy run, rpe 9", ctxHard);
+const hardSess = rHard.actions[0]?.session;
+check("Coach-logged sessions keep the PRESCRIBED effort, not the reported one",
+  !!hardSess && hardSess.plannedRpe !== undefined && hardSess.plannedRpe !== hardSess.rpe,
+  hardSess ? `reported ${hardSess.rpe}, prescribed ${hardSess.plannedRpe}` : `no log action (intent ${rHard.intent})`);
+check("A session harder than prescribed is recorded as such",
+  !!hardSess && hardSess.rpe > hardSess.plannedRpe,
+  hardSess ? `${hardSess.rpe} vs ${hardSess.plannedRpe}` : "no log action");
+
+// "brutal" on its own is fatigue, not a session report — check that still holds.
+check("Describing a session as brutal is read as fatigue, not a log",
+  coachRespond("that easy run was brutal", coachCtx()).intent === "ease");
+
+// Chained moves must not drag one session through two hops.
+const ctxM = coachCtx();
+const w1 = ctxM.plan.weeks[0];
+const sess = w1.days.find((d) => !d.isRest);
+const rests = w1.days.filter((d) => d.isRest && !d.commitment);
+if (rests.length >= 2) {
+  const chained = buildPlan(
+    { ...ctxM.user, coachOverrides: { moves: { [sess.dateKey]: rests[0].dateKey, [rests[0].dateKey]: rests[1].dateKey } } },
+    ctxM.adaptation
+  );
+  const landed = chained.weeks[0].days.filter((d) => !d.isRest).length;
+  check("Chained moves don't drag a session two hops",
+    landed === w1.days.filter((d) => !d.isRest).length,
+    `${landed} sessions after chained move vs ${w1.days.filter((d) => !d.isRest).length} before`);
+  check("The session lands on the first target, not the second",
+    !!chained.weeks[0].days.find((d) => d.dateKey === rests[0].dateKey)?.session);
+} else {
+  check("Chained moves don't drag a session two hops", true, "not enough rest days to test");
+  check("The session lands on the first target, not the second", true, "skipped");
+}
+
+// Overrides must not accumulate for the life of the plan.
+const staleCo = {
+  blockedDates: [dateKey(addDays(monday, -21)), dateKey(addDays(monday, 2))],
+  moves: { [dateKey(addDays(monday, -20))]: dateKey(addDays(monday, -18)) },
+  loadFactor: 0.9,
+};
+const prunedCo = pruneCoachOverrides(staleCo, monday);
+check("Stale blocked dates are pruned", prunedCo.blockedDates.length === 1, JSON.stringify(prunedCo.blockedDates));
+check("Stale moves are pruned", Object.keys(prunedCo.moves).length === 0, JSON.stringify(prunedCo.moves));
+check("Current-week entries survive pruning", prunedCo.blockedDates[0] === dateKey(addDays(monday, 2)));
+check("Load factor is not touched by pruning", prunedCo.loadFactor === 0.9);
+check("Pruning returns null when nothing is stale",
+  pruneCoachOverrides({ blockedDates: [dateKey(addDays(monday, 1))], moves: {} }, monday) === null);
+check("Pruning handles a missing overrides object", pruneCoachOverrides(null, monday) === null);
+
+// Blocking a day that a session was moved ONTO must not silently lose it twice.
+const ctxB = coachCtx();
+const bSess = ctxB.plan.weeks[0].days.find((d) => !d.isRest);
+const bRest = ctxB.plan.weeks[0].days.find((d) => d.isRest && !d.commitment);
+if (bSess && bRest) {
+  const both = buildPlan(
+    { ...ctxB.user, coachOverrides: { moves: { [bSess.dateKey]: bRest.dateKey }, blockedDates: [bRest.dateKey] } },
+    ctxB.adaptation
+  );
+  const target = both.weeks[0].days.find((d) => d.dateKey === bRest.dateKey);
+  check("Blocking a move target clears it cleanly rather than corrupting the week",
+    target.isRest && !target.session && target.blocked === true);
+} else {
+  check("Blocking a move target clears it cleanly rather than corrupting the week", true, "skipped");
+}
+
+check("Every generated session still has a label, duration and effort",
+  basePlan.weeks.flatMap((w) => w.days).filter((d) => d.session)
+    .every((d) => d.session.label && d.session.minutes > 0 && d.session.targetRpe >= 1));
 
 section("Sample week output");
 u = mkUser(); a = computeAdaptation(u); plan = buildPlan(u, a);

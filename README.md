@@ -29,6 +29,7 @@ nothing is saved until you choose to change the goal or proceed anyway.
 - **Week** — all seven days, navigable across the whole plan
 - **Plan** — every week at a glance, phases, test weeks, gear list, feasibility warnings,
   and a running projection of your goal
+- **Coach** — tell it what actually happened and it changes the plan around you
 - **Profile** — current fitness, training paces, editable goal / schedule / injury focus,
   every adjustment the plan has made, and your account
 
@@ -83,6 +84,67 @@ it produces interrupted training.
 
 Blockers say what to do instead, with a specific date or time. They never stop you — you can
 always build it anyway, and the warnings follow you onto the Plan tab.
+
+## Design
+
+Black ground, one electric accent, heavy condensed display type, oversized numerals,
+generous air. Built to be read at arm's length, mid-session, out of breath — so the things
+you need while training (what, how long, how hard) are the largest things on screen.
+
+- **Type** — [Anton](https://fonts.google.com/specimen/Anton) for headings and numerals,
+  system stack for body text so it renders instantly and offline. One external font, one
+  request, with a real fallback stack (`Haettenschweiler`, `Arial Narrow`).
+- **Colour** — `#D8FF00` volt, used only where it means something: the active tab, a logged
+  session, your fitness number, the primary action. Never decoration.
+- **Structure** — near-square cards, pill buttons, uppercase micro-labels at 0.14em tracking.
+  Workout steps are numbered `01`–`05` so you can find your place at a glance.
+- **Voice** — imperative and short. *Log it. Rate it first. Build it. Rest.*
+
+This deliberately borrows the visual language of athletic brands — bold condensed caps, high
+contrast, big numbers. It does **not** use any brand's trademarks: no swoosh, no wordmark,
+no borrowed slogan. The style is the point, not the badge.
+
+The CSP allows `fonts.googleapis.com` (stylesheet) and `fonts.gstatic.com` (font files) for
+exactly this one face. Nothing else external loads.
+
+## The coach
+
+A chat tab that turns what you tell it into real changes. It is **rule-based, not an LLM** —
+it runs offline, costs nothing, needs no backend or API key, and is fully deterministic,
+which is why all of it is covered by tests.
+
+| You say | What happens |
+|---|---|
+| "ran 30 easy instead of the intervals" | Logs the real session at the real effort, on the interval day — not just today |
+| "missed today, no time" | Moves it to a free day this week, or tells you to let it go |
+| "can't train Thursday, work dinner" | Blocks the day, moves the session, reshuffles the week |
+| "I'm away tuesday to thursday" | Handles the whole range |
+| "legs are wrecked" | Cuts volume, holds intensity, explains why that way round |
+| "felt great, too easy" | Raises volume, refuses to make your easy days harder |
+| "my knee hurts" | Removes impact for three days, adds knee prehab, tells you to see a physio |
+| "what am I doing today?" | Answers from your actual plan |
+
+**It says when it hasn't understood**, and offers examples instead of guessing. A coach that
+silently misinterprets you is worse than one that admits the gap.
+
+**What it won't do.** It can't change your goal or deadline — that runs the feasibility gate,
+so it hands you to the goal editor instead of quietly retargeting your plan. And it isn't a
+physio: it takes the load off and tells you to get it looked at, but it never diagnoses.
+Describe something sharp, swollen, or worsening and it says plainly that you're past what a
+training plan should be working around.
+
+Everything it changes is stored in `coachOverrides` and applied *on top of* the generated
+plan, never baked into it — so every change is reversible by clearing the override, and the
+underlying plan stays intact.
+
+Two things it deliberately refuses to do, both from watching it get them wrong in testing:
+
+- **It never converts a test to another modality.** A bike time trial can't calibrate running
+  paces, and a time trial run injured gives a slow, unrepresentative number that would then
+  reset every pace in your plan. It postpones the test and says why.
+- **It never stacks two sessions on one day** when reshuffling. If there's no free day, the
+  session is dropped and you're told, because doubling up is how a missed session becomes a
+  missed fortnight.
 
 ## Changing your mind
 
@@ -160,7 +222,7 @@ python3 -m http.server 8000
 ```
 
 Open `http://localhost:8000/index.html?demo=1`. Open `/test.html` to run the engine suite
-(110 checks: VDOT math, plan structure, scheduling, volume ramp, intensity, every adaptation
+(175 checks: VDOT math, plan structure, scheduling, volume ramp, intensity, every adaptation
 rule, derived fitness, schedule history, feasibility, and coverage of every requirement).
 
 It must be served over HTTP — `file://` breaks ES module imports.
@@ -231,7 +293,8 @@ errors until their token happened to expire.
 - `list` — **denied outright**, so the collection can't be enumerated
 - `create` — only your own uid, with validated shape and size, and empty logs/tests
 - `update` — only `logs`, `tests`, `fitness`, `goal`, `schedule`, `scheduleHistory`,
-  `profile`, and `changeLog`, with each validated for shape and bounded for size
+  `profile`, `changeLog`, `chat`, and `coachOverrides`, each validated for shape and
+  bounded for size (the coach's load factor is clamped in the rules too, not just the app)
 - `planStart` is immutable — if it could move, every logged date would silently re-index
 - The four fitness answers inside `profile` are immutable, so editing your goal or schedule
   cannot launder a new fitness level into the plan
@@ -298,6 +361,7 @@ sessions, and test results. It asks twice and cannot be undone.
 | File | What's in it |
 |---|---|
 | `plan-engine.js` | VDOT math, scheduling, plan generation, adaptation, feasibility, goal assessment |
+| `coach.js` | Interprets what you tell the coach and turns it into structured actions |
 | `workouts.js` | Exercise library, warm-ups, prehab, strength/conditioning builders |
 | `app.js` | Auth, rendering, Firestore I/O, onboarding |
 | `index.html` | Shell, CSP, tab structure |
@@ -314,5 +378,6 @@ targets) lives in `plan-engine.js`.
 
 ## Cache-busting
 
-`index.html`, `app.js`, and `plan-engine.js` carry `?v=` on their imports — currently `v=9`.
+`index.html`, `app.js`, `plan-engine.js`, and `coach.js` carry `?v=` on their imports —
+currently `v=14`.
 Bump them on every deploy that touches CSS or JS, or phones will serve stale copies for days.

@@ -12,7 +12,8 @@
 <meta http-equiv="Content-Security-Policy" content="
   default-src 'self';
   script-src 'self' https://www.gstatic.com https://apis.google.com;
-  style-src 'self' 'unsafe-inline';
+  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+  font-src https://fonts.gstatic.com;
   img-src 'self' data: https://*.googleusercontent.com;
   connect-src 'self' https://*.googleapis.com https://*.firebaseapp.com https://securetoken.googleapis.com https://identitytoolkit.googleapis.com;
   frame-src https://*.firebaseapp.com https://accounts.google.com;
@@ -28,7 +29,12 @@
 <!-- Cache-busting: bump ?v= here and in app.js's imports on every deploy that
      changes style.css, app.js, plan-engine.js, or workouts.js. Without it,
      phones keep serving stale copies for a long time after a push. -->
-<link rel="stylesheet" href="style.css?v=9" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<!-- One display face, used only for headings and numerals. Everything else is
+     the system stack so body text renders instantly and offline. -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Anton&display=swap" />
+<link rel="stylesheet" href="style.css?v=15" />
 </head>
 <body>
 <div class="app">
@@ -55,8 +61,9 @@
     <nav class="tabs">
       <button class="tab-btn active" data-tab="today">Today</button>
       <button class="tab-btn" data-tab="week">Week</button>
+      <button class="tab-btn" data-tab="coach">Coach</button>
       <button class="tab-btn" data-tab="plan">Plan</button>
-      <button class="tab-btn" data-tab="profile">Profile</button>
+      <button class="tab-btn" data-tab="profile">You</button>
     </nav>
 
     <section id="view-today" class="view active">
@@ -75,6 +82,15 @@
       <div id="week-days"></div>
     </section>
 
+    <section id="view-coach" class="view">
+      <div id="coach-log" class="coach-log"></div>
+      <div id="coach-quick" class="coach-quick"></div>
+      <div class="coach-composer">
+        <textarea id="coach-input" rows="1" placeholder="What actually happened?" maxlength="500"></textarea>
+        <button id="coach-send" class="btn btn-primary">Send</button>
+      </div>
+    </section>
+
     <section id="view-plan" class="view">
       <div id="plan-content"></div>
     </section>
@@ -88,6 +104,6 @@
   <div id="modal-root"></div>
 </div>
 
-<script type="module" src="app.js?v=9"></script>
+<script type="module" src="app.js?v=15"></script>
 </body>
 </html>

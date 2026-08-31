@@ -5,7 +5,7 @@
 import {
   WARMUPS, COOLDOWNS, strengthBlock, conditioningBlock, prehabBlock,
   MOBILITY_FLOW, INJURY_FOCUS_LABELS,
-} from "./workouts.js?v=9";
+} from "./workouts.js?v=15";
 
 export { INJURY_FOCUS_LABELS };
 
@@ -517,6 +517,83 @@ function buildSession({ type, minutes, tier, phase, weekNum, weekInPhase, paces,
 
 // ---------------------------------------------------------------- plan builder
 
+// ---------------------------------------------------------------- coach overrides
+// Changes the coach has made in conversation. Applied after a week is
+// generated, so the underlying plan stays intact and every override is
+// reversible by clearing it — nothing is baked into the schedule itself.
+
+const RUN_TYPES = new Set(["easy", "strides", "intervals", "tempo", "long", "test"]);
+
+function applyCoachOverrides(dayEntries, user) {
+  const co = user.coachOverrides || {};
+  const byKey = Object.fromEntries(dayEntries.map((d) => [d.dateKey, d]));
+
+  // 1. Moves first, so a session is rescued off a day before that day is blocked.
+  for (const [from, to] of Object.entries(co.moves || {})) {
+    const src = byKey[from];
+    const dst = byKey[to];
+    if (!src || !dst || !src.session) continue;
+    if (dst.session) continue; // never stack two sessions on one day
+    // A session that has already been moved into this day must not be moved
+    // again by a later rule — otherwise chained moves drag it two hops.
+    if (src.movedFrom) continue;
+    dst.session = src.session;
+    dst.isRest = false;
+    dst.movedFrom = from;
+    src.session = null;
+    src.isRest = true;
+    src.movedTo = to;
+  }
+
+  // 2. Days the athlete told us they can't train.
+  const blocked = new Set(co.blockedDates || []);
+  for (const d of dayEntries) {
+    if (!blocked.has(d.dateKey)) continue;
+    d.session = null;
+    d.isRest = true;
+    d.blocked = true;
+  }
+
+  // 3. Impact removed while something hurts. Duration and effort are kept —
+  //    the stimulus is preserved, only the loading through the legs changes.
+  if (co.softenUntil) {
+    const until = parseDateKey(co.softenUntil);
+    for (const d of dayEntries) {
+      if (!d.session || d.date > until) continue;
+      const s = d.session;
+      if (s.type === "test") {
+        // A test must never be swapped to another modality. A bike time trial
+        // cannot calibrate running paces, and a run done hurt gives a slow,
+        // unrepresentative result — either way the number would then reset
+        // every pace in the plan. Postponing is the only honest option.
+        s.lines = [
+          `⚕️ Coach note: don't time-trial on something that hurts. Postpone this test until it's settled — a result set while injured would recalibrate every pace in your plan off a number that isn't you, and cross-training can't substitute because it measures a different engine.`,
+          ...s.lines,
+        ];
+        s.postponeAdvised = true;
+        continue;
+      }
+      if (RUN_TYPES.has(s.type)) {
+        s.label = `${s.label} — low impact`;
+        s.lowImpact = true;
+        s.lines = [
+          `⚕️ Coach swap: do this on a bike, rower, elliptical, or in the pool — same duration, same effort, no running while this is sore.`,
+          `Target: ${s.minutes} min at RPE ${s.targetRpe}.`,
+          ...s.lines.filter((l) => !/^Main|^Fast finish|^Strides|^Main set/.test(l)),
+        ];
+      } else if (["strength", "lower", "full", "conditioning"].includes(s.type)) {
+        s.lowImpact = true;
+        s.lines = [
+          `⚕️ Coach note: skip anything that loads the sore area, and drop jumping or landing work entirely today.`,
+          ...s.lines,
+        ];
+      }
+    }
+  }
+
+  return dayEntries;
+}
+
 function phaseFor(week, buildEnd, totalWeeks) {
   if (week > buildEnd) return "Taper";
   const p = week / buildEnd;
@@ -606,6 +683,9 @@ export function buildPlan(user, adaptation) {
     // catch up with the engine. This is the one place ambition is overruled.
     if (needsRampGuard && w <= RAMP_GUARD_WEEKS) factor *= RAMP_GUARD_FACTOR;
     factor *= adapt.volumeFactor;
+    // A load change the athlete asked for in chat, from the week they asked.
+    const co = user.coachOverrides || {};
+    if (co.loadFactor && w >= (co.loadFactorFromWeek || 1)) factor *= co.loadFactor;
     factor = Math.max(0.4, Math.min(1.15, factor));
 
     // Never exceed the session length the athlete actually said they have.
@@ -672,6 +752,8 @@ export function buildPlan(user, adaptation) {
       dayEntries.push(entry);
     }
 
+    applyCoachOverrides(dayEntries, user);
+
     weeks.push({
       num: w,
       phase,
@@ -713,6 +795,25 @@ function weekFocus({ phase, isDeload, isTest, isTaper, isGoalWeek, goal }) {
   if (phase === "Base") return "Base — building the aerobic floor and movement quality.";
   if (phase === "Build") return "Build — adding intensity on top of the base.";
   return "Peak — the hardest, most specific work of the plan.";
+}
+
+// Blocked days and moves are only ever about a specific past or present week.
+// Left unpruned they accumulate for the life of the plan, eventually hitting
+// the size caps in the Firestore rules. Returns null when nothing changed.
+export function pruneCoachOverrides(co, today = new Date()) {
+  if (!co) return null;
+  const cutoff = mondayOnOrBefore(today);
+  const keep = (k) => parseDateKey(k) >= cutoff;
+
+  const blockedDates = (co.blockedDates || []).filter(keep);
+  const moves = Object.fromEntries(Object.entries(co.moves || {}).filter(([from, to]) => keep(from) && keep(to)));
+
+  const changed =
+    blockedDates.length !== (co.blockedDates || []).length ||
+    Object.keys(moves).length !== Object.keys(co.moves || {}).length;
+
+  if (!changed) return null;
+  return { ...co, blockedDates, moves };
 }
 
 export function getWeek(plan, n) {

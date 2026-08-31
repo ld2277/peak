@@ -2,7 +2,7 @@
 // Cache-busting: bump ?v= here and in index.html on every deploy that changes
 // app.js, plan-engine.js, workouts.js, or style.css.
 
-import { firebaseConfig } from "./firebase-config.js?v=9";
+import { firebaseConfig } from "./firebase-config.js?v=15";
 import {
   WORKOUT_FREQ, CARDIO_FREQ, RUN_DURATION, INJURY_FOCUS_LABELS,
   WEEKDAYS, WEEKDAYS_SHORT, COMMITMENT_LOADS, SESSION_COUNTS, SESSION_MINUTES,
@@ -10,9 +10,10 @@ import {
   dateKey, parseDateKey, addDays, mondayOnOrBefore,
   formatDuration, formatPace, paceToMile, parseTimeToSeconds,
   buildPlan, getWeek, getDayForDate, computeAdaptation, goalAssessment,
-  feasibilityReport, deriveFitness,
-} from "./plan-engine.js?v=9";
-import { RPE_SCALE, GEAR_LABELS } from "./workouts.js?v=9";
+  feasibilityReport, deriveFitness, pruneCoachOverrides,
+} from "./plan-engine.js?v=15";
+import { RPE_SCALE, GEAR_LABELS } from "./workouts.js?v=15";
+import { coachRespond } from "./coach.js?v=15";
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
@@ -471,8 +472,8 @@ function renderOnboarding() {
   $("#view-onboard").innerHTML = `
     <div class="card hero-card">
       <p class="eyebrow">Peak</p>
-      <h1>Build your plan</h1>
-      <p class="muted">Three short steps. Everything after this is generated from your answers and adjusts itself as you train.</p>
+      <h1>Build the plan</h1>
+      <p class="muted">Three steps. Everything after this is built from your answers, and moves as you train.</p>
     </div>
     <div class="steps">
       ${["Fitness", "Schedule", "Goal"].map((s, i) => `<div class="step ${i === onboardStep ? "current" : i < onboardStep ? "done" : ""}"><span class="step-num">${i + 1}</span>${s}</div>`).join("")}
@@ -555,7 +556,7 @@ function renderOnboarding() {
       <div class="onboard-nav">
         <button type="button" id="btn-back" class="btn btn-ghost ${onboardStep === 0 ? "hidden" : ""}">Back</button>
         <button type="button" id="btn-next" class="btn btn-primary ${onboardStep === 2 ? "hidden" : ""}">Continue</button>
-        <button type="submit" id="btn-build" class="btn btn-primary ${onboardStep === 2 ? "" : "hidden"}">Build my plan</button>
+        <button type="submit" id="btn-build" class="btn btn-primary ${onboardStep === 2 ? "" : "hidden"}">Build it</button>
       </div>
     </form>
 
@@ -734,7 +735,7 @@ async function handleOnboardSubmit(e) {
     console.error(e2);
     showErr("Couldn't save your plan. Check the Firebase setup in the README.");
     btn.disabled = false;
-    btn.textContent = "Build my plan";
+    btn.textContent = "Build it";
   }
 
   function showErr(msg) {
@@ -742,7 +743,7 @@ async function handleOnboardSubmit(e) {
     err.classList.remove("hidden");
     err.scrollIntoView({ behavior: "smooth", block: "center" });
     btn.disabled = false;
-    btn.textContent = "Build my plan";
+    btn.textContent = "Build it";
   }
 }
 
@@ -774,8 +775,8 @@ function sessionCardHtml(day, week, { showLog = false } = {}) {
       </div>
       <h2>${escapeHtml(s.label)}</h2>
       <div class="session-meta">
-        <span>⏱ ${s.minutes} min</span>
-        <span>🎯 RPE ${s.targetRpe}</span>
+        <span>${s.minutes} min</span>
+        <span>RPE ${s.targetRpe}</span>
       </div>
       <ul class="workout-list">
         ${s.lines.map((l) => `<li class="${l.startsWith("🩹") ? "extra" : ""}">${escapeHtml(l)}</li>`).join("")}
@@ -789,18 +790,18 @@ function sessionCardHtml(day, week, { showLog = false } = {}) {
 
 function logControlsHtml(day, week, logged) {
   if (logged?.done) {
-    return `<div class="logged-banner">✅ Logged${typeof logged.rpe === "number" ? ` at RPE ${logged.rpe}` : ""}</div>`;
+    return `<div class="logged-banner">Done${typeof logged.rpe === "number" ? ` · RPE ${logged.rpe}` : ""}</div>`;
   }
   if (day.session.type === "test") {
-    return `<button id="log-btn" class="btn btn-primary btn-block">Record test result</button>`;
+    return `<button id="log-btn" class="btn btn-primary btn-block">Enter your result</button>`;
   }
   return `
     <div class="log-block">
-      <p class="log-prompt">How hard did that feel?</p>
+      <p class="log-prompt">How hard was it?</p>
       <div class="rpe-picker" id="rpe-picker">
         ${[2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => `<button type="button" class="rpe-btn" data-rpe="${n}">${n}</button>`).join("")}
       </div>
-      <button id="log-btn" class="btn btn-primary btn-block" disabled>Pick an effort to log</button>
+      <button id="log-btn" class="btn btn-primary btn-block" disabled>Rate it first</button>
     </div>
   `;
 }
@@ -816,7 +817,7 @@ function wireLogControls(day, week) {
       b.classList.add("selected");
       chosenRpe = Number(b.dataset.rpe);
       btn.disabled = false;
-      btn.textContent = "Mark complete";
+      btn.textContent = "Log it";
     });
   });
 
@@ -930,7 +931,7 @@ function renderToday() {
     c.innerHTML = `
       <div class="card">
         <div class="session-head"><span class="badge">Week ${week.num} · ${week.phase}</span></div>
-        <h2>Rest Day</h2>
+        <h2>Rest</h2>
         <p>${day.commitment
           ? `You've got ${escapeHtml(day.commitment.label)} today — that's the load. Nothing extra from the plan.`
           : "Sleep, eat, stay off your feet. Adaptation happens on these days, not the hard ones."}</p>
@@ -967,7 +968,7 @@ function weekGlanceHtml(week) {
 function rpeGuideHtml() {
   return `
     <details class="card rpe-card">
-      <summary>What does RPE mean?</summary>
+      <summary>What is RPE?</summary>
       <p class="muted">Rate of Perceived Exertion — how hard the effort feels, 1 to 10.</p>
       ${RPE_SCALE.map((r) => `
         <div class="rpe-row">
@@ -1523,6 +1524,196 @@ function openInjuryEditor() {
   });
 }
 
+// ---------------------------------------------------------------- coach
+
+const QUICK_PROMPTS = [
+  "What am I doing today?",
+  "Ran 30 easy instead of the intervals",
+  "Can't train Thursday",
+  "Legs are wrecked",
+];
+
+// Turns the coach's structured actions into stored state. The coach decides
+// what should change; this is the only place anything actually changes.
+async function applyCoachActions(actions) {
+  const patch = {};
+  const co = { ...(user.coachOverrides || {}) };
+  let touchedOverrides = false;
+  let touchedLogs = false;
+
+  for (const a of actions) {
+    if (a.type === "logActual") {
+      const entry = {
+        done: true,
+        rpe: a.session.rpe,
+        targetRpe: a.session.plannedRpe ?? a.session.rpe,
+        type: a.session.type,
+        minutes: a.session.minutes,
+        actual: { label: a.session.label, note: a.session.note },
+        viaCoach: true,
+      };
+      user.logs = user.logs || {};
+      user.logs[a.dateKey] = entry;
+      await persistField(`logs.${a.dateKey}`, entry);
+      touchedLogs = true;
+    }
+
+    else if (a.type === "blockDates") {
+      co.blockedDates = [...new Set([...(co.blockedDates || []), ...a.dates])];
+      touchedOverrides = true;
+    }
+
+    else if (a.type === "unblockDates") {
+      co.blockedDates = (co.blockedDates || []).filter((d) => !a.dates.includes(d));
+      touchedOverrides = true;
+    }
+
+    else if (a.type === "moveSession") {
+      co.moves = { ...(co.moves || {}), [a.from]: a.to };
+      touchedOverrides = true;
+    }
+
+    else if (a.type === "setLoad") {
+      co.loadFactor = a.factor;
+      co.loadFactorFromWeek = adaptation.currentWeek;
+      co.loadReason = a.reason;
+      touchedOverrides = true;
+    }
+
+    else if (a.type === "softenDays") {
+      co.softenUntil = dateKey(addDays(new Date(), a.days));
+      co.softenReason = a.reason;
+      touchedOverrides = true;
+    }
+
+    else if (a.type === "addInjuryFocus") {
+      const list = [...new Set([...(user.profile.injuryFocus || []), a.part])].slice(0, 8);
+      user.profile = { ...user.profile, injuryFocus: list };
+      patch.profile = user.profile;
+    }
+
+    else if (a.type === "openGoalEditor") {
+      // Handled by the caller once the message has rendered.
+    }
+  }
+
+  if (touchedOverrides) {
+    user.coachOverrides = co;
+    patch.coachOverrides = co;
+  }
+  if (Object.keys(patch).length) await persistDoc(patch);
+  return touchedOverrides || touchedLogs || Object.keys(patch).length > 0;
+}
+
+async function appendChat(entry) {
+  user.chat = [...(user.chat || []), entry].slice(-120);
+  await persistDoc({ chat: user.chat });
+}
+
+function chatBubbleHtml(m) {
+  const cls = m.role === "user" ? "from-user" : "from-coach";
+  const time = new Date(m.at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  // Coach replies are authored here, never by a third party, but they still go
+  // through escaping — the only untrusted input is the athlete's own text.
+  const body = escapeHtml(m.text).replace(/\n/g, "<br>");
+  return `
+    <div class="bubble ${cls}">
+      <div class="bubble-body">${body}</div>
+      ${m.changes?.length ? `<div class="bubble-changes">${m.changes.map((c) => `<span class="change-pill">${escapeHtml(c)}</span>`).join("")}</div>` : ""}
+      <div class="bubble-time">${time}</div>
+    </div>`;
+}
+
+function renderCoach() {
+  const log = $("#coach-log");
+  const history = user.chat || [];
+
+  log.innerHTML = history.length
+    ? history.map(chatBubbleHtml).join("")
+    : `<div class="coach-intro">
+        <h2>Talk to your coach</h2>
+        <p class="muted">Tell me what actually happened and I'll change the plan around it. I can log a session you did differently, reshuffle a week you can't make, and dial the load up or down.</p>
+        <p class="hint">I won't change your goal from here — that runs a feasibility check in Profile → Your goal. And I'm not a physio: if something hurts, I'll take the impact out, but I'll tell you to get it looked at.</p>
+      </div>`;
+
+  $("#coach-quick").innerHTML = history.length
+    ? ""
+    : QUICK_PROMPTS.map((p) => `<button type="button" class="quick-prompt">${escapeHtml(p)}</button>`).join("");
+
+  $$(".quick-prompt").forEach((b) => b.addEventListener("click", () => {
+    $("#coach-input").value = b.textContent;
+    sendToCoach();
+  }));
+
+  log.scrollTop = log.scrollHeight;
+}
+
+let coachBusy = false;
+
+async function sendToCoach() {
+  if (coachBusy) return;
+  const input = $("#coach-input");
+  const text = input.value.trim();
+  if (!text) return;
+
+  coachBusy = true;
+  input.value = "";
+  $("#coach-send").disabled = true;
+
+  await appendChat({ role: "user", text: text.slice(0, 500), at: Date.now() });
+  renderCoach();
+
+  try {
+    const res = coachRespond(text, { user, plan, adaptation, today: new Date() });
+    const changed = await applyCoachActions(res.actions || []);
+
+    if (changed) {
+      viewedWeek = null;
+      rebuild();
+      await persistFitness();
+    }
+
+    // Short, human-readable summary of what actually moved.
+    const changes = [];
+    for (const a of res.actions || []) {
+      if (a.type === "logActual") changes.push(`Logged ${WEEKDAYS_SHORT[(parseDateKey(a.dateKey).getDay() + 6) % 7]}`);
+      if (a.type === "blockDates") changes.push(`${a.dates.length} day${a.dates.length === 1 ? "" : "s"} blocked`);
+      if (a.type === "moveSession") changes.push("Session moved");
+      if (a.type === "setLoad") changes.push(`Load ${Math.round(a.factor * 100)}%`);
+      if (a.type === "softenDays") changes.push("Impact removed");
+      if (a.type === "addInjuryFocus") changes.push("Prehab added");
+    }
+
+    await appendChat({ role: "coach", text: res.reply, at: Date.now(), changes, intent: res.intent });
+    renderCoach();
+    if (changed) { renderToday(); renderWeek(); renderPlanOverview(); renderProfile(); }
+    if ((res.actions || []).some((a) => a.type === "openGoalEditor")) {
+      switchTab("profile");
+      setTimeout(openGoalEditor, 300);
+    }
+  } catch (e) {
+    console.error(e);
+    await appendChat({
+      role: "coach",
+      text: "Something went wrong on my end and I couldn't apply that. Your plan is unchanged — try rephrasing it.",
+      at: Date.now(),
+      changes: [],
+    });
+    renderCoach();
+  } finally {
+    coachBusy = false;
+    $("#coach-send").disabled = false;
+    input.focus();
+  }
+}
+
+function initCoach() {
+  $("#coach-send").addEventListener("click", sendToCoach);
+  $("#coach-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendToCoach(); }
+  });
+}
+
 // ---------------------------------------------------------------- shell
 
 function switchTab(name) {
@@ -1536,6 +1727,7 @@ function renderAll() {
   renderWeek();
   renderPlanOverview();
   renderProfile();
+  renderCoach();
 }
 
 // One of: "auth" | "onboard" | "app"
@@ -1556,6 +1748,7 @@ function enterApp() {
 
 function initShell() {
   $$(".tab-btn").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
+  initCoach();
   $("#week-prev").addEventListener("click", () => { if (viewedWeek > 1) { viewedWeek--; renderWeek(); } });
   $("#week-next").addEventListener("click", () => { if (viewedWeek < plan.totalWeeks) { viewedWeek++; renderWeek(); } });
 }
@@ -1576,6 +1769,12 @@ async function loadForUid() {
     const found = await fetchUser(currentUid());
     if (found) {
       user = found;
+      // Drop blocked days and moves from weeks that have already passed.
+      const pruned = pruneCoachOverrides(user.coachOverrides);
+      if (pruned) {
+        user.coachOverrides = pruned;
+        persistDoc({ coachOverrides: pruned }).catch((e) => console.error(e));
+      }
       rebuild();
       persistFitness();
       enterApp();
