@@ -301,7 +301,7 @@ python3 -m http.server 8000
 ```
 
 Open `http://localhost:8000/index.html?demo=1`. Open `/test.html` to run the engine suite
-(323 checks: VDOT math, plan structure, scheduling, volume ramp, intensity, every adaptation
+(345 checks: VDOT math, plan structure, scheduling, volume ramp, intensity, every adaptation
 rule, derived fitness, schedule history, feasibility, and coverage of every requirement).
 
 It must be served over HTTP — `file://` breaks ES module imports.
@@ -409,6 +409,15 @@ only the version published in the console is enforced.
 health-app data, no analytics, no third-party scripts. Free-text input is limited to a 60-char
 name and 40-char commitment labels, both length-capped client-side and validated in the rules.
 
+**Robustness.** `stress.html` builds plans from deliberately malformed documents — null
+collections, wrong types, an illness with no end date, `NaN` load factors — because Firestore
+can hand back a partial or stale document and the app must not blank out. It also covers
+numeric extremes (a one-second 5K, a negative time), plan boundaries (2 weeks to 52, six
+sessions with two free days), idempotency, and hostile input.
+
+**Performance.** Fuzzy matching costs about **0.3 ms** per message even on a 400-word input,
+and a 52-week plan builds in ~1 ms. There is no need for caching or debouncing.
+
 **Error messages.** Exceptions are logged to the console and never rendered verbatim.
 Unrecognised failures show a plain message instead of a raw stack or internal string.
 
@@ -451,6 +460,7 @@ sessions, and test results. It asks twice and cannot be undone.
 | `probe.html` / `probe-gaps.html` | Measured coach coverage, 72 phrasings |
 | `probe-messy.html` | Typos, txt-speak and rambling input, 26 cases |
 | `audit.html` | Interaction audit — overlapping overrides on one week |
+| `stress.html` | Malformed state, numeric extremes, boundaries, performance, hostile input |
 
 ## Editing the training content
 
@@ -461,5 +471,5 @@ targets) lives in `plan-engine.js`.
 ## Cache-busting
 
 `index.html`, `app.js`, `plan-engine.js`, and `coach.js` carry `?v=` on their imports —
-currently `v=33`.
+currently `v=34`.
 Bump them on every deploy that touches CSS or JS, or phones will serve stale copies for days.

@@ -1,0 +1,137 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Stress + robustness</title>
+<style>body{font-family:ui-monospace,Menlo,monospace;background:#0A0A0A;color:#eee;padding:20px;font-size:12.5px;line-height:1.55}
+.ok{color:#D8FF00}.bad{color:#FF4D4D;font-weight:700}h2{color:#D8FF00;margin:18px 0 6px}</style></head><body>
+<div id="out">running…</div>
+<script>window.addEventListener("error",e=>{document.getElementById("out").innerHTML=`<div class="bad">CRASH: ${e.message}</div>`});</script>
+<script type="module">
+import { buildPlan, computeAdaptation, deriveFitness, feasibilityReport, goalAssessment,
+         vdotFromRace, predictRaceSeconds, parseTimeToSeconds, pruneCoachOverrides,
+         sessionsScheduledForWeek, dateKey, addDays, mondayOnOrBefore } from "./plan-engine.js?v=34";
+import { coachRespond } from "./coach.js?v=34";
+
+const monday = mondayOnOrBefore(new Date());
+const mk = (over={}) => ({ name:"T", planStart: dateKey(monday),
+  profile:{workoutsPerWeek:"low",cardioPerWeek:"mid",runDuration:"to45",fiveKSeconds:1530,injuryFocus:[], ...(over.profile||{})},
+  schedule:{sessionsPerWeek:4,minutesPerSession:60,commitments:{}, ...(over.schedule||{})},
+  goal:{type:"endurance",event:"tenK",targetSeconds:null,deadline:dateKey(addDays(monday,120)), ...(over.goal||{})},
+  logs:over.logs||{}, tests:over.tests||{}, coachOverrides:over.coachOverrides||{} });
+
+let out="", bad=0;
+// This harness prints hostile strings back out, so it must escape them itself.
+// It didn't at first, and the XSS payload rendered as a live <img> in the
+// report — a neat demonstration that the app escapes and a scratch page doesn't.
+const esc=(v)=>String(v==null?"":v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+const T=(n,c,d)=>{ if(!c) bad++; out+=`<div class="${c?'ok':'bad'}">${c?'ok ':'BUG'} ${esc(n)}${d?` — ${esc(d)}`:''}</div>`; };
+const H=h=>out+=`<h2>${h}</h2>`;
+const safe=(fn)=>{ try { return {ok:true, v:fn()}; } catch(e){ return {ok:false, e:e.message}; } };
+
+// ---------------------------------------------------------------- A
+H("A. Malformed or partial stored state (Firestore can hand back anything)");
+const junkCases = [
+  ["null collections", {races:null,extraSessions:null,moves:null,blockedDates:null,swaps:null}],
+  ["wrong types", {blockedDates:"nope",moves:"nope",races:"nope",extraSessions:"nope"}],
+  ["illness with no until", {illness:{level:"systemic"}}],
+  ["effortOnly with no until", {effortOnly:{reason:"heat"}}],
+  ["race with no dateKey", {races:[{meters:5000}]}],
+  ["extraSession with no type", {extraSessions:[{weekday:2}]}],
+  ["loadFactor NaN", {loadFactor:NaN,loadFactorFromWeek:1}],
+  ["exerciseRules null", {exerciseRules:null}],
+];
+for (const [name, co] of junkCases) {
+  const r = safe(()=>buildPlan(mk({coachOverrides:co}), computeAdaptation(mk({coachOverrides:co}))));
+  T(`buildPlan survives ${name}`, r.ok, r.e);
+  if (r.ok) T(`  …and still produces sane days for ${name}`,
+    r.v.weeks.every(w=>w.days.length===7 && w.days.every(d=>d.isRest ? !d.session : (d.session&&d.session.minutes>0))),
+    "malformed day produced");
+}
+T("Missing logs/tests keys entirely", safe(()=>{const u=mk();delete u.logs;delete u.tests;
+  return buildPlan(u, computeAdaptation(u));}).ok);
+T("Missing scheduleHistory", safe(()=>sessionsScheduledForWeek(mk(),3)).ok);
+T("deriveFitness survives junk tests", safe(()=>deriveFitness(mk({tests:{1:{type:"run"},2:null,3:{seconds:0,meters:0}}}))).ok);
+
+// ---------------------------------------------------------------- B
+H("B. Numeric extremes");
+T('parseTimeToSeconds("99:99")', parseTimeToSeconds("99:99")===99*60+99, String(parseTimeToSeconds("99:99")));
+T('parseTimeToSeconds("0:00") is 0', parseTimeToSeconds("0:00")===0);
+T('parseTimeToSeconds("-5:00") is rejected outright', parseTimeToSeconds("-5:00")===null,
+  String(parseTimeToSeconds("-5:00")));
+T('A negative 5K time never reaches the fitness maths', (()=>{
+  const u=mk({profile:{fiveKSeconds:parseTimeToSeconds("-5:00")}});
+  const p=buildPlan(u,computeAdaptation(u));
+  return isFinite(p.vdot)&&p.vdot>=20;})());
+T('parseTimeToSeconds("1:2:3:4") rejected', parseTimeToSeconds("1:2:3:4")===null, String(parseTimeToSeconds("1:2:3:4")));
+const absurd = safe(()=>vdotFromRace(1,5000));
+T("vdotFromRace with a 1-second 5K does not crash", absurd.ok, absurd.e);
+const clamped = safe(()=>buildPlan(mk({profile:{fiveKSeconds:1}}), computeAdaptation(mk({profile:{fiveKSeconds:1}}))));
+T("An impossible 5K time is clamped, not propagated as garbage",
+  clamped.ok && clamped.v.vdot<=75 && isFinite(clamped.v.vdot), clamped.ok?String(clamped.v.vdot):clamped.e);
+T("Paces stay finite and positive at the clamp",
+  clamped.ok && Object.values(clamped.v.paces).every(p=>isFinite(p)&&p>0));
+const slow = safe(()=>buildPlan(mk({profile:{fiveKSeconds:9999}}), computeAdaptation(mk({profile:{fiveKSeconds:9999}}))));
+T("A very slow 5K also stays finite", slow.ok && isFinite(slow.v.vdot), slow.ok?String(slow.v.vdot):slow.e);
+const fz = safe(()=>feasibilityReport(mk({goal:{targetSeconds:1}})));
+T("feasibilityReport handles a 1-second target", fz.ok && fz.v.some(i=>i.severity==="blocker"), fz.e);
+
+// ---------------------------------------------------------------- C
+H("C. Plan boundaries");
+const short = safe(()=>{const u=mk({goal:{deadline:dateKey(addDays(monday,14))}});return buildPlan(u,computeAdaptation(u));});
+T("A 2-week plan builds", short.ok && short.v.totalWeeks>=2, short.ok?`${short.v.totalWeeks} weeks`:short.e);
+const long = safe(()=>{const u=mk({goal:{deadline:dateKey(addDays(monday,364))}});return buildPlan(u,computeAdaptation(u));});
+T("A 52-week plan builds", long.ok && long.v.totalWeeks>=52, long.ok?`${long.v.totalWeeks} weeks`:long.e);
+T("Every week of a 52-week plan is coherent",
+  long.ok && long.v.weeks.every(w=>w.days.length===7 && w.phase && w.focus));
+const boxed = safe(()=>{const c={};[0,1,2,3,4].forEach(i=>c[i]={load:"hard",label:"x"});
+  const u=mk({schedule:{sessionsPerWeek:6,commitments:c}});return buildPlan(u,computeAdaptation(u));});
+T("6 sessions with only 2 free days doesn't crash", boxed.ok, boxed.e);
+T("…and caps at the free days, with a warning",
+  boxed.ok && boxed.v.warnings.length>0 && boxed.v.weeks.every(w=>w.days.filter(d=>!d.isRest).length<=2),
+  boxed.ok?boxed.v.weeks[0].days.filter(d=>!d.isRest).length+" sessions":"");
+const tiny = safe(()=>{const u=mk({schedule:{minutesPerSession:30},goal:{event:"marathon"}});return buildPlan(u,computeAdaptation(u));});
+T("Marathon on 30-min sessions builds and warns",
+  tiny.ok && tiny.v.warnings.some(w=>/long runs/.test(w)), tiny.e);
+T("Deadline in the past is handled", safe(()=>{const u=mk({goal:{deadline:dateKey(addDays(monday,-30))}});
+  return buildPlan(u,computeAdaptation(u));}).ok);
+
+// ---------------------------------------------------------------- D
+H("D. Idempotency");
+const co1 = {blockedDates:[dateKey(addDays(monday,2))], loadFactor:0.9, loadFactorFromWeek:1};
+const p1 = buildPlan(mk({coachOverrides:co1}), computeAdaptation(mk({coachOverrides:co1})));
+const p2 = buildPlan(mk({coachOverrides:co1}), computeAdaptation(mk({coachOverrides:co1})));
+T("Building the same plan twice gives an identical result",
+  JSON.stringify(p1.weeks.map(w=>w.days.map(d=>d.session?.label||"rest"))) ===
+  JSON.stringify(p2.weeks.map(w=>w.days.map(d=>d.session?.label||"rest"))));
+const dup = {blockedDates:[dateKey(addDays(monday,2)),dateKey(addDays(monday,2))],
+             extraSessions:[{weekday:2,type:"upper",fromWeek:1},{weekday:2,type:"upper",fromWeek:1}]};
+const pd = buildPlan(mk({coachOverrides:dup}), computeAdaptation(mk({coachOverrides:dup})));
+T("Duplicate overrides don't double-apply",
+  pd.weeks[0].days.filter(d=>d.addedByCoach).length<=1,
+  pd.weeks[0].days.filter(d=>d.addedByCoach).length+" added");
+
+// ---------------------------------------------------------------- E
+H("E. Performance of fuzzy matching");
+const u=mk(); const a=computeAdaptation(u); const plan=buildPlan(u,a);
+const longMsg = "so basically ".repeat(30) + "i ran 40 minutes easy this morning and my knee felt a bit tight afterwards but nothing serious";
+const t0=performance.now();
+for(let i=0;i<200;i++) coachRespond(longMsg,{user:u,plan,adaptation:a,today:monday});
+const per=(performance.now()-t0)/200;
+T(`200 long messages average ${per.toFixed(1)}ms each`, per < 50, `${per.toFixed(1)}ms — over 50ms would be felt`);
+const t1=performance.now(); buildPlan(mk({goal:{deadline:dateKey(addDays(monday,364))}}), a);
+const buildMs=performance.now()-t1;
+T(`A 52-week plan builds in ${buildMs.toFixed(0)}ms`, buildMs < 400, `${buildMs.toFixed(0)}ms`);
+
+// ---------------------------------------------------------------- F
+H("F. Hostile input");
+// Split so the literal tag can't close this script block.
+const XSS = "<scr" + "ipt>alert(1)</scr" + "ipt>";
+const hostile = [XSS, "<img src=x onerror=alert(1)>", "'; DROP TABLE users; --", "a".repeat(5000),
+  "🏃‍♂️🔥💪 ran 40 min", "\\u0000\\u0001 null bytes", "", "   ", "?????", "12345678901234567890"];
+for (const h of hostile) {
+  const r = safe(()=>coachRespond(h,{user:u,plan,adaptation:a,today:monday}));
+  T(`Survives ${JSON.stringify(h.slice(0,28))}`, r.ok && typeof r.v?.reply === "string", r.e);
+}
+T("A 5000-char message still returns quickly", (()=>{const s=performance.now();
+  coachRespond("a".repeat(5000),{user:u,plan,adaptation:a,today:monday});return performance.now()-s<200;})());
+
+document.getElementById("out").innerHTML =
+  (bad?`<h2 class="bad">${bad} PROBLEM${bad>1?'S':''}</h2>`:`<h2>ALL CLEAN</h2>`)+out;
+</script></body></html>

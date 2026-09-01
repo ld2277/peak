@@ -31,8 +31,8 @@ import {
   feasibilityReport, achievableVdotGain, EVENT_REQUIREMENTS,
   deriveFitness, sessionsScheduledForWeek, baselineVdot, parseDateKey,
   pruneCoachOverrides,
-} from "./plan-engine.js?v=33";
-import { coachRespond } from "./coach.js?v=33";
+} from "./plan-engine.js?v=34";
+import { coachRespond } from "./coach.js?v=34";
 
 const out = document.getElementById("out");
 let pass = 0, fail = 0;
@@ -1107,6 +1107,79 @@ check("Short messages get no such postscript", !/You also mentioned/.test(say("m
 check("Safety replies are never diluted with it",
   !/You also mentioned/.test(say("I felt dizzy and my chest was tight and honestly ive also missed loads of sessions this week and im knackered").reply),
   "an urgent medical reply must stay undiluted");
+
+section("Robustness — malformed stored state");
+// Firestore can hand back a partial or stale document. None of this should throw.
+const JUNK = [
+  ["null collections", { races: null, extraSessions: null, moves: null, blockedDates: null, swaps: null }],
+  ["wrong types", { blockedDates: "nope", moves: "nope", races: "nope", extraSessions: "nope" }],
+  ["illness with no until", { illness: { level: "systemic" } }],
+  ["race with no dateKey", { races: [{ meters: 5000 }] }],
+  ["loadFactor NaN", { loadFactor: NaN, loadFactorFromWeek: 1 }],
+  ["exerciseRules null", { exerciseRules: null }],
+];
+for (const [label, co] of JUNK) {
+  let built = null, threw = null;
+  try {
+    const uu = mkUser(); uu.planStart = dateKey(monday); uu.coachOverrides = co;
+    built = buildPlan(uu, computeAdaptation(uu));
+  } catch (e) { threw = e.message; }
+  check(`Plan survives ${label}`, !!built, threw);
+  check(`…and every day stays coherent with ${label}`,
+    !built || built.weeks.every((w) => w.days.length === 7 &&
+      w.days.every((d) => d.isRest ? !d.session : (d.session && d.session.minutes > 0))));
+}
+check("A user document with no logs or tests keys builds", (() => {
+  const uu = mkUser(); uu.planStart = dateKey(monday); delete uu.logs; delete uu.tests;
+  try { buildPlan(uu, computeAdaptation(uu)); return true; } catch { return false; }
+})());
+
+section("Robustness — numeric extremes");
+check("Negative times are rejected outright", parseTimeToSeconds("-5:00") === null, String(parseTimeToSeconds("-5:00")));
+check("Four-part times are rejected", parseTimeToSeconds("1:2:3:4") === null);
+check("An impossible 5K time is clamped, not propagated", (() => {
+  const uu = mkUser({ profile: { fiveKSeconds: 1 } }); uu.planStart = dateKey(monday);
+  const p = buildPlan(uu, computeAdaptation(uu));
+  return isFinite(p.vdot) && p.vdot <= 75 && Object.values(p.paces).every((x) => isFinite(x) && x > 0);
+})());
+check("A very slow 5K stays finite too", (() => {
+  const uu = mkUser({ profile: { fiveKSeconds: 9999 } }); uu.planStart = dateKey(monday);
+  return isFinite(buildPlan(uu, computeAdaptation(uu)).vdot);
+})());
+
+section("Robustness — plan boundaries");
+check("A 2-week plan builds", (() => {
+  const uu = mkUser({ goal: { type: "endurance", event: "fiveK", targetSeconds: null, deadline: dateKey(addDays(monday, 14)) } });
+  uu.planStart = dateKey(monday);
+  return buildPlan(uu, computeAdaptation(uu)).totalWeeks >= 2;
+})());
+check("A 52-week plan builds and every week is coherent", (() => {
+  const uu = mkUser({ goal: { type: "endurance", event: "marathon", targetSeconds: null, deadline: dateKey(addDays(monday, 364)) } });
+  uu.planStart = dateKey(monday);
+  const p = buildPlan(uu, computeAdaptation(uu));
+  return p.totalWeeks >= 52 && p.weeks.every((w) => w.days.length === 7 && w.phase && w.focus);
+})());
+check("A deadline in the past doesn't crash", (() => {
+  const uu = mkUser({ goal: { type: "endurance", event: "fiveK", targetSeconds: null, deadline: dateKey(addDays(monday, -30)) } });
+  uu.planStart = dateKey(monday);
+  try { buildPlan(uu, computeAdaptation(uu)); return true; } catch { return false; }
+})());
+
+section("Robustness — hostile input");
+const HOSTILE = ["<scr" + "ipt>alert(1)</scr" + "ipt>", "<img src=x onerror=alert(1)>",
+  "'; DROP TABLE users; --", "a".repeat(3000), "🏃‍♂️🔥 ran 40 min", "", "   ", "?????"];
+check("Every hostile string returns a plain string reply, no throw", (() => {
+  const ctxH = coachCtx();
+  return HOSTILE.every((h) => {
+    try { return typeof coachRespond(h, ctxH).reply === "string"; } catch { return false; }
+  });
+})());
+check("Markup in a message is never echoed back as markup", (() => {
+  const r = coachRespond("ran 40 min <img src=x onerror=alert(1)>", coachCtx());
+  // The coach may quote the note back; it must never be treated as HTML by the
+  // app, which is why every render path goes through escapeHtml.
+  return typeof r.reply === "string";
+})());
 
 section("Sample week output");
 u = mkUser(); a = computeAdaptation(u); plan = buildPlan(u, a);

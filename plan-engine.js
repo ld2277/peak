@@ -5,7 +5,7 @@
 import {
   WARMUPS, COOLDOWNS, strengthBlock, conditioningBlock, prehabBlock,
   MOBILITY_FLOW, INJURY_FOCUS_LABELS,
-} from "./workouts.js?v=33";
+} from "./workouts.js?v=34";
 
 export { INJURY_FOCUS_LABELS };
 
@@ -128,6 +128,9 @@ export function parseTimeToSeconds(str) {
   const parts = String(str).trim().split(":").map((p) => p.trim());
   if (parts.some((p) => p === "" || isNaN(Number(p)))) return null;
   const nums = parts.map(Number);
+  // A negative time is a typo, not a fast one. Accepting it fed a nonsense
+  // value into the fitness maths, where clamping hid it rather than fixing it.
+  if (nums.some((n) => n < 0 || !isFinite(n))) return null;
   if (nums.length === 1) return Math.round(nums[0] * 60);
   if (nums.length === 2) return Math.round(nums[0] * 60 + nums[1]);
   if (nums.length === 3) return Math.round(nums[0] * 3600 + nums[1] * 60 + nums[2]);
