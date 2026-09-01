@@ -1,0 +1,61 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Messy input probe</title>
+<style>body{font-family:ui-monospace,Menlo,monospace;background:#0A0A0A;color:#eee;padding:20px;font-size:12px}
+h2{color:#D8FF00;margin:18px 0 6px}td{padding:3px 10px 3px 0;vertical-align:top;border-bottom:1px solid #222}
+.ok{color:#D8FF00}.bad{color:#FF4D4D}.meh{color:#FFB020}</style></head><body>
+<div id="out">running…</div>
+<script>window.addEventListener("error",e=>{document.getElementById("out").innerHTML=`<span style="color:#FF4D4D">CRASH: ${e.message}</span>`});</script>
+<script type="module">
+import { buildPlan, computeAdaptation, dateKey, mondayOnOrBefore } from "./plan-engine.js?v=33";
+import { coachRespond } from "./coach.js?v=33";
+const monday = mondayOnOrBefore(new Date());
+const user = { name:"T", planStart: dateKey(monday),
+  profile:{workoutsPerWeek:"low",cardioPerWeek:"mid",runDuration:"to45",fiveKSeconds:1530,injuryFocus:[]},
+  schedule:{sessionsPerWeek:4,minutesPerSession:60,commitments:{}},
+  goal:{type:"endurance",event:"tenK",targetSeconds:null,deadline:dateKey(new Date(monday.getFullYear(),monday.getMonth()+3,monday.getDate()))},
+  logs:{},tests:{},coachOverrides:{} };
+const a = computeAdaptation(user); const plan = buildPlan(user, a);
+const ask = (m) => coachRespond(m, {user, plan, adaptation:a, today:monday});
+
+// [input, expected intent]
+const CASES = {
+ "Typos and txt-speak":[
+  ["ran 40 mins easy this mornin","logActual"],
+  ["did my long run yestrday, felt gd","logActual"],
+  ["cant train thurdsay work dinner","unavailable"],
+  ["my kne hurts","pain"],
+  ["legs r wrecked","ease"],
+  ["add a strenght session on tuesdays","addSession"],
+  ["i wanna replace pullups with dips","exerciseRules"],
+  ["im on holliday for 2 weeks","absence"],
+  ["ive got a cold, feelin rough","illness"],
+  ["whats a delaod week","explain"],
+  ["i only slept 4 hrs last nite","lifeLoad"],
+  ["runing on trails this week","environment"],
+  ["undo tht","undo"],
+  ["swich tuesday and thursday","swapDays"],
+  ["i have a parkrun sat","race"],
+  ["did 5k pb today 23:40","logActual"]],
+ "Rambling with several signals at once":[
+  ["so my knee was a bit sore yesterday but its fine now, anyway i did 40 mins easy and im thinking maybe i should add some gym stuff","*"],
+  ["not sure whats going on but everything feels harder than it should and my sleep has been rubbish and ive got a half marathon in 6 weeks","*"],
+  ["missed monday and tuesday cos work was mental, knee is a bit tight too, might just do an easy one tomorrow","*"]],
+ "Unstructured / rambling":[
+  ["so i was gonna do the intervals but my knee was sore so i just did an easy 30 instead","pain"],
+  ["tbh this week has been mental at work and im knackered","lifeLoad"],
+  ["yeah so didnt really do much, missed tues and weds","missed"],
+  ["hey quick one - can you bump me up to 5 sessions a week please","scheduleChange"],
+  ["ok so the plan says intervals today but honestly i cant face it","*"],
+  ["morning! just wanted to say i did the long run and it went really well","completed"],
+  ["i think i need to shorten my sessions to 45 mins","scheduleChange"]],
+};
+let html="", pass=0, tot=0;
+for (const [g,list] of Object.entries(CASES)) {
+  html += `<h2>${g}</h2><table>`;
+  for (const [m,exp] of list) { tot++; const r=ask(m);
+    const good = exp==="*" ? r.intent!=="unknown" : r.intent===exp;
+    if(good) pass++;
+    html += `<tr><td class="${good?'ok':'bad'}">${good?'ok':'MISS'}</td><td>${m}</td><td>${r.intent}</td><td class="meh">${good?'':'want '+exp}</td></tr>`; }
+  html += "</table>";
+}
+document.getElementById("out").innerHTML = `<h2>${pass}/${tot} correct</h2>`+html;
+</script></body></html>

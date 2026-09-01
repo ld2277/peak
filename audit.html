@@ -5,8 +5,8 @@
 <script>window.addEventListener("error",e=>{document.getElementById("out").innerHTML=`<div class="bad">CRASH: ${e.message}</div>`});</script>
 <script type="module">
 import { buildPlan, computeAdaptation, deriveFitness, sessionsScheduledForWeek,
-         dateKey, addDays, mondayOnOrBefore, pruneCoachOverrides } from "./plan-engine.js?v=29";
-import { coachRespond } from "./coach.js?v=29";
+         dateKey, addDays, mondayOnOrBefore, pruneCoachOverrides } from "./plan-engine.js?v=33";
+import { coachRespond } from "./coach.js?v=33";
 
 const monday = mondayOnOrBefore(new Date());
 const base = () => ({ name:"T", planStart: dateKey(monday),

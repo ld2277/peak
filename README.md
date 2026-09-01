@@ -152,6 +152,37 @@ All 37 are understood. `audit.html` is separate and more important: it tests the
 land on the same week. Feature-by-feature tests passed while several of those combinations
 were broken. `probe-gaps.html` covers a further 35 (illness, races, absence, environment, corrections, safety) — all 35 handled. Run it whenever you change the parsing.
 
+### Typos and messy input
+
+Real messages are misspelt, abbreviated and rambling. Matching is fuzzy, using bounded
+Damerau-Levenshtein so transpositions ("delaod", "thurdsay") cost one edit rather than two —
+they're the commonest typo and plain edit distance handles them badly.
+
+Naive fuzzy matching is dangerous, so three guards apply:
+
+1. **Words under 5 characters must match exactly.** At that length everything is one edit
+   from everything.
+2. **The first letter must match.** Typos overwhelmingly preserve it, and this is what stops
+   *face* → *race*, *rain* → *pain*, *gold* → *cold*.
+3. **Real English words are never treated as typos.** This shipped as a bug: "add some gym
+   **stuff**" matched *stuffy* and reported the athlete as ill.
+
+Apostrophe-less contractions ("dont", "cant", "im", "didnt") are expanded first —
+deliberately excluding "ill", "its" and "well", where expansion would break more than it
+fixes.
+
+**Rambling messages** carrying several signals get acted on by priority, and the coach names
+what else it saw rather than silently ignoring half the message. Safety replies are never
+diluted this way.
+
+`probe-messy.html` measures this: 26 misspelt, abbreviated and rambling inputs, all handled.
+
+**Where this runs out.** This is pattern matching, not comprehension. It handles messy
+phrasings of things it knows about; it cannot handle a genuinely novel request, and it will
+never infer intent from context the way a language model would. When it doesn't understand,
+it says so rather than guessing — which is the honest failure mode for a system that changes
+your training plan.
+
 **It says when it hasn't understood**, and offers examples instead of guessing. A coach that
 silently misinterprets you is worse than one that admits the gap.
 
@@ -270,7 +301,7 @@ python3 -m http.server 8000
 ```
 
 Open `http://localhost:8000/index.html?demo=1`. Open `/test.html` to run the engine suite
-(305 checks: VDOT math, plan structure, scheduling, volume ramp, intensity, every adaptation
+(323 checks: VDOT math, plan structure, scheduling, volume ramp, intensity, every adaptation
 rule, derived fitness, schedule history, feasibility, and coverage of every requirement).
 
 It must be served over HTTP — `file://` breaks ES module imports.
@@ -418,6 +449,7 @@ sessions, and test results. It asks twice and cannot be undone.
 | `firestore.rules` | Paste into the Firebase console Rules tab |
 | `test.html` | Engine test harness — 305 checks |
 | `probe.html` / `probe-gaps.html` | Measured coach coverage, 72 phrasings |
+| `probe-messy.html` | Typos, txt-speak and rambling input, 26 cases |
 | `audit.html` | Interaction audit — overlapping overrides on one week |
 
 ## Editing the training content
@@ -429,5 +461,5 @@ targets) lives in `plan-engine.js`.
 ## Cache-busting
 
 `index.html`, `app.js`, `plan-engine.js`, and `coach.js` carry `?v=` on their imports —
-currently `v=29`.
+currently `v=33`.
 Bump them on every deploy that touches CSS or JS, or phones will serve stale copies for days.

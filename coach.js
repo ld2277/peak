@@ -12,7 +12,7 @@
 import {
   dateKey, parseDateKey, addDays, weekdayIndex, WEEKDAYS, WEEKDAYS_SHORT,
   formatDuration, formatPace, INJURY_FOCUS_LABELS, vdotFromRace,
-} from "./plan-engine.js?v=29";
+} from "./plan-engine.js?v=33";
 
 // ---------------------------------------------------------------- text utils
 
@@ -35,12 +35,109 @@ function normalise(text) {
   return ` ${String(text || "").toLowerCase().replace(/[’']/g, "'").replace(/[^a-z0-9'\s:.\-\/%]/g, " ").replace(/\s+/g, " ").trim()} `.replace(/\S+/g, (w) => expandContractions(w));
 }
 
+// ---------------------------------------------------------------- fuzzy matching
+//
+// People type "holliday", "delaod", "thurdsay". Exact substring matching misses
+// all of it. Bounded edit distance fixes that, but naive fuzzing is dangerous:
+// "face" is one edit from "race", and "i can't face it" would book a race.
+//
+// Two guards make it safe:
+//   1. Only words of 5+ characters are fuzzed at all — short words must match
+//      exactly, because at that length everything is one edit from everything.
+//   2. The first letter must match. Typos overwhelmingly preserve it, and this
+//      is what stops face/race, pain/rain, cold/bold.
+
+let _tokCache = { str: null, toks: null };
+function tokensFor(t) {
+  if (_tokCache.str === t) return _tokCache.toks;
+  _tokCache = { str: t, toks: t.trim().split(/\s+/).filter(Boolean) };
+  return _tokCache.toks;
+}
+
+// Bounded Damerau-Levenshtein — bails out as soon as the whole row exceeds max.
+// The transposition case matters: swapped adjacent letters ("delaod", "teh",
+// "recieve") are the single commonest typo, and plain Levenshtein scores them
+// as two edits, which puts them outside a sane tolerance.
+function lev(a, b, max) {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let prevPrev = null;
+  let prev = new Array(b.length + 1);
+  for (let j = 0; j <= b.length; j++) prev[j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    const cur = new Array(b.length + 1);
+    cur[0] = i;
+    let best = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      let v = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        v = Math.min(v, prevPrev[j - 2] + 1);
+      }
+      cur[j] = v;
+      if (v < best) best = v;
+    }
+    if (best > max) return max + 1;
+    prevPrev = prev;
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+// Guard 3, learned the hard way: "add some gym stuff" fuzzy-matched "stuffy"
+// and reported the athlete as ill. A token that is already an ordinary English
+// word is not a typo of something else — it's that word. Only misspellings get
+// fuzzed, never real words.
+const NEVER_FUZZ = new Set([
+  "about", "after", "again", "along", "also", "always", "another", "anything", "around", "away",
+  "back", "been", "before", "being", "below", "best", "better", "between", "both", "bring",
+  "came", "come", "could", "doing", "down", "during", "each", "early", "enough", "even", "ever",
+  "every", "face", "fact", "feel", "felt", "find", "fine", "first", "from", "full", "give",
+  "going", "gone", "good", "great", "half", "hard", "have", "here", "home", "hour", "just",
+  "keep", "kind", "know", "last", "late", "left", "less", "like", "line", "little", "long",
+  "look", "lots", "made", "make", "many", "maybe", "mean", "might", "mine", "more", "most",
+  "much", "must", "near", "need", "never", "next", "nice", "night", "none", "nothing", "often",
+  "once", "only", "other", "over", "part", "past", "place", "plan", "point", "pretty", "quite",
+  "rain", "read", "real", "really", "right", "room", "said", "same", "seem", "sent", "short",
+  "should", "side", "since", "small", "some", "soon", "sort", "sound", "space", "spent",
+  "start", "state", "still", "stuff", "such", "sure", "take", "than", "that", "their", "them",
+  "then", "there", "these", "they", "thing", "think", "this", "those", "though", "three",
+  "through", "time", "today", "told", "took", "tried", "turn", "under", "until", "upon",
+  "used", "very", "want", "week", "well", "went", "were", "what", "when", "where", "which",
+  "while", "will", "with", "work", "would", "year", "your",
+]);
+
+function wordMatches(tok, word) {
+  if (tok === word) return true;
+  if (word.length < 5) return false;              // guard 1: short words exact only
+  if (tok[0] !== word[0]) return false;           // guard 2: typos keep the first letter
+  if (NEVER_FUZZ.has(tok)) return false;          // guard 3: real words aren't typos
+  const tol = word.length >= 8 ? 2 : 1;
+  return lev(tok, word, tol) <= tol;
+}
+
+function fuzzyHas(t, phrase) {
+  const p = phrase.trim().split(/\s+/).filter(Boolean);
+  if (!p.length) return false;
+  const toks = tokensFor(t);
+  for (let i = 0; i + p.length <= toks.length; i++) {
+    let ok = true;
+    for (let k = 0; k < p.length; k++) {
+      if (!wordMatches(toks[i + k], p[k])) { ok = false; break; }
+    }
+    if (ok) return true;
+  }
+  return false;
+}
+
 function has(t, ...words) {
-  return words.some((w) => t.includes(` ${w} `) || t.includes(` ${w}.`) || t.includes(` ${w},`));
+  if (words.some((w) => t.includes(` ${w} `) || t.includes(` ${w}.`) || t.includes(` ${w},`))) return true;
+  return words.some((w) => fuzzyHas(t, w));
 }
 
 function hasAny(t, list) {
-  return list.some((w) => t.includes(w));
+  // Exact first — it's cheap and covers most messages.
+  if (list.some((w) => t.includes(w))) return true;
+  return list.some((w) => fuzzyHas(t, w));
 }
 
 // ---------------------------------------------------------------- entities
@@ -317,7 +414,8 @@ const ADD_TYPE_LABEL = {
 
 // ---------------------------------------------------------------- feel words
 
-const BAD_FEEL = [" wrecked", " exhausted", " shattered", " knackered", " dead legs", " destroyed",
+const BAD_FEEL = [" harder than it should", " feels harder", " feeling harder", " harder than usual",
+  " wrecked", " exhausted", " shattered", " knackered", " dead legs", " destroyed",
   " flat", " heavy legs", " struggled", " struggling", " brutal", " too hard", " really hard",
   " couldn't finish", " could not finish", " blew up", " bonked", " rough", " awful", " terrible",
   " drained", " fatigued", " burnt out", " burned out", " wiped"];
@@ -342,7 +440,8 @@ const UNAVAILABLE_WORDS = [" can't train", " cannot train", " can't make", " can
   " won't be able", " will not be able", " away", " travelling", " traveling", " on a trip",
   " out of town", " busy", " work dinner", " no time on", " unavailable", " can't do"];
 
-const MORE_WORDS = [" too easy", " want more", " more volume", " harder", " push harder",
+const MORE_WORDS = [" too easy", " want more", " more volume", " push harder", " go harder",
+  " train harder", " make it harder", " week harder", " bit harder",
   " ramp up", " increase", " add more", " not enough", " under-training", " undertrained",
   " step it up", " bump it up"];
 
@@ -436,7 +535,8 @@ const RACE_CANCEL = [" race got cancelled", " race is cancelled", " race was can
   " cancelled the race", " not doing the race", " pulled out of", " race got called off"];
 
 const SLEEP_STRESS = [" slept", " no sleep", " insomnia", " stressed", " stressful",
-  " burnt out", " burned out", " exams", " deadline", " work has been"];
+  " burnt out", " burned out", " exams", " deadline", " work has been",
+  " at work", " work is", " workload", " overwhelmed at", " full on at"];
 
 const PROGRESS_Q = [" getting fitter", " am i improving", " progressing", " getting faster",
   " am i improving", " making progress", " any better than"];
@@ -456,7 +556,39 @@ function parseSpanDays(t) {
 
 // Ordered by priority: pain is checked before anything else, because a plan
 // change is never the right first response to someone reporting an injury.
+// A rambling message often carries several signals at once. The coach acts on
+// the highest-priority one, but staying silent about the rest makes it look
+// like it only read half the message. Naming them is cheap and honest.
+const SECONDARY_SIGNALS = [
+  { intents: ["pain"], label: "something hurting", test: (t) => hasAny(t, PAIN_WORDS) },
+  { intents: ["ease"], label: "how tired you are", test: (t) => hasAny(t, BAD_FEEL) },
+  { intents: ["missed", "unavailable"], label: "a missed session", test: (t) => hasAny(t, MISS_WORDS) },
+  { intents: ["race"], label: "a race coming up", test: (t) => hasAny(t, RACE_ADD_WORDS) },
+  { intents: ["lifeLoad"], label: "sleep or stress", test: (t) => hasAny(t, SLEEP_STRESS) },
+  { intents: ["addSession"], label: "wanting to add sessions", test: (t) => hasAny(t, ADD_CUES) },
+  { intents: ["illness"], label: "being unwell", test: (t) => hasAny(t, ILLNESS_SYSTEMIC) || hasAny(t, ILLNESS_GENERAL) },
+];
+
+// Never appended to safety responses — those must not be diluted with
+// housekeeping, and never to "unknown", which already asks for a rephrase.
+const NO_SECONDARY = new Set(["urgentMedical", "eatingConcern", "outOfScope", "unknown", "undo"]);
+
 export function coachRespond(message, ctx) {
+  const res = coachRespondCore(message, ctx);
+  const t = normalise(message);
+  if (NO_SECONDARY.has(res.intent) || tokensFor(t).length < 14) return res;
+
+  const others = SECONDARY_SIGNALS
+    .filter((sig) => !sig.intents.includes(res.intent) && sig.test(t))
+    .map((sig) => sig.label);
+  if (!others.length) return res;
+
+  const list = others.length === 1 ? others[0]
+    : others.slice(0, -1).join(", ") + " and " + others[others.length - 1];
+  return { ...res, reply: `${res.reply}\n\nYou also mentioned ${list} — I've only acted on the main thing. Say more about that and I'll deal with it too.`, secondary: others };
+}
+
+function coachRespondCore(message, ctx) {
   const { user, plan, adaptation } = ctx;
   const today = ctx.today || new Date();
   const t = normalise(message);
@@ -767,8 +899,8 @@ function detectScheduleChange(t) {
 
   // Changing session length needs an explicit imperative, not just the word
   // "session" sitting next to a number.
-  const imperative = /\b(make|change|set|switch|move)\s+(my|them|the|to)\b/.test(t)
-    || /\bi\s+(want|'d like|would like)\b/.test(t);
+  const imperative = /\b(make|change|set|switch|move|shorten|lengthen|extend|reduce|cut)\s+(my|them|the|to|down|back)\b/.test(t)
+    || /\bi\s+(want|need|'d like|would like)\b/.test(t);
   m = t.match(/\b(\d{2,3})\s*(?:min|mins|minute|minutes)\b/);
   if (m && imperative && hasAny(t, [" session", " sessions", " workout", " workouts", " training", " each", " them"])) {
     out.minutesPerSession = Math.max(20, Math.min(120, parseInt(m[1], 10)));

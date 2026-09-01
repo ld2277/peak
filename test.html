@@ -31,8 +31,8 @@ import {
   feasibilityReport, achievableVdotGain, EVENT_REQUIREMENTS,
   deriveFitness, sessionsScheduledForWeek, baselineVdot, parseDateKey,
   pruneCoachOverrides,
-} from "./plan-engine.js?v=29";
-import { coachRespond } from "./coach.js?v=29";
+} from "./plan-engine.js?v=33";
+import { coachRespond } from "./coach.js?v=33";
 
 const out = document.getElementById("out");
 let pass = 0, fail = 0;
@@ -1059,6 +1059,54 @@ check("Recovery is understood on its own when an illness is active", (() => {
 })());
 check("But 'feeling better' with no illness on record isn't a recovery",
   say("feeling better now").intent !== "recovered", say("feeling better now").intent);
+
+section("Typos and messy input");
+check("A missing letter is understood", say("ran 40 mins easy this mornin").intent === "logActual");
+check("A doubled letter is understood", say("im on holliday for 2 weeks").intent === "absence");
+check("A transposition is understood", say("whats a delaod week").intent === "explain",
+  say("whats a delaod week").intent);
+check("A transposed weekday is understood", say("cant train thurdsay work dinner").intent === "unavailable");
+check("A misspelt exercise is understood", say("add a strenght session on tuesdays").intent === "addSession");
+check("Txt-speak is understood", say("legs r wrecked").intent === "ease");
+check("Short words are NOT fuzzed", say("my kne hurts").intent === "pain",
+  "kne->knee is a body part, matched through the exercise/pain path");
+
+section("Fuzzy matching must not invent meaning");
+// Every one of these is a near-miss for a keyword. Matching any of them would
+// change the plan on the strength of a coincidence.
+check("'i cant face it' is not read as a race",
+  say("ok so the plan says intervals today but honestly i cant face it").intent !== "race",
+  "face is one edit from race");
+check("'add some gym stuff' is not read as illness",
+  !/illness/.test(say("so my knee was a bit sore yesterday but its fine now, anyway i did 40 mins easy and im thinking maybe i should add some gym stuff").intent),
+  "stuff is one edit from stuffy — this shipped as a bug and must stay fixed");
+check("'gold' is not read as 'cold'", say("i won a gold medal at the weekend").intent !== "illness");
+check("'it started to rain' is not read as pain",
+  say("it started to rain halfway round").intent !== "pain");
+check("Real English words are never treated as typos", (() => {
+  const words = ["i need to work on my form", "that was a really good week", "the plan looks fine"];
+  return words.every((w) => {
+    const r = say(w);
+    return !["illness", "urgentMedical", "eatingConcern", "race"].includes(r.intent);
+  });
+})(), "a common word must never fuzzy-match into a keyword");
+
+check("'everything feels harder than it should' LOWERS the load, not raises it", (() => {
+  const r = say("not sure whats going on but everything feels harder than it should and my sleep has been rubbish");
+  const load = r.actions.find((x) => x.type === "setLoad");
+  return load && load.factor < 1;
+})(), "reading a complaint as a request to train harder is the wrong way round");
+check("An explicit request to train harder still raises it",
+  say("make next week harder").actions.some((x) => x.type === "setLoad" && x.factor > 1));
+
+section("Rambling messages name what else was said");
+const ramble = say("missed monday and tuesday cos work was mental, knee is a bit tight too, might just do an easy one tomorrow");
+check("It acts on the highest-priority signal", ramble.intent === "pain", ramble.intent);
+check("It names the other signals it saw", /You also mentioned/.test(ramble.reply), ramble.reply.slice(-90));
+check("Short messages get no such postscript", !/You also mentioned/.test(say("my knee hurts").reply));
+check("Safety replies are never diluted with it",
+  !/You also mentioned/.test(say("I felt dizzy and my chest was tight and honestly ive also missed loads of sessions this week and im knackered").reply),
+  "an urgent medical reply must stay undiluted");
 
 section("Sample week output");
 u = mkUser(); a = computeAdaptation(u); plan = buildPlan(u, a);
