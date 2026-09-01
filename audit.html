@@ -1,0 +1,130 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Interaction audit</title>
+<style>body{font-family:ui-monospace,Menlo,monospace;background:#0A0A0A;color:#eee;padding:20px;font-size:12.5px;line-height:1.6}
+.ok{color:#D8FF00}.bad{color:#FF4D4D;font-weight:700}h2{color:#D8FF00;margin:20px 0 6px}</style></head><body>
+<div id="out">running…</div>
+<script>window.addEventListener("error",e=>{document.getElementById("out").innerHTML=`<div class="bad">CRASH: ${e.message}</div>`});</script>
+<script type="module">
+import { buildPlan, computeAdaptation, deriveFitness, sessionsScheduledForWeek,
+         dateKey, addDays, mondayOnOrBefore, pruneCoachOverrides } from "./plan-engine.js?v=29";
+import { coachRespond } from "./coach.js?v=29";
+
+const monday = mondayOnOrBefore(new Date());
+const base = () => ({ name:"T", planStart: dateKey(monday),
+  profile:{workoutsPerWeek:"low",cardioPerWeek:"mid",runDuration:"to45",fiveKSeconds:1530,injuryFocus:[]},
+  schedule:{sessionsPerWeek:4,minutesPerSession:60,commitments:{}},
+  goal:{type:"endurance",event:"tenK",targetSeconds:null,deadline:dateKey(addDays(monday,120))},
+  logs:{},tests:{},coachOverrides:{} });
+
+let out="", bad=0;
+const T=(name,cond,detail)=>{ if(!cond) bad++; out+=`<div class="${cond?'ok':'bad'}">${cond?'ok ':'BUG'} ${name}${detail?` — ${detail}`:''}</div>`; };
+const H=(h)=>out+=`<h2>${h}</h2>`;
+
+// ---- 1. Does a blocked week really not count against adherence?
+H("1. Absence vs adherence (the coach promises it won't count)");
+// Two weeks away — the whole adherence window is blocked, as a real holiday would be.
+const u1 = base();
+u1.planStart = dateKey(addDays(monday,-14));
+u1.coachOverrides = { blockedDates: [] };
+for (let i=0;i<14;i++) u1.coachOverrides.blockedDates.push(dateKey(addDays(monday,-14+i)));
+const a1 = computeAdaptation(u1);
+T("A blocked holiday is not counted as missed sessions",
+  a1.volumeFactor === 1 && a1.sessionsAdjust === 0,
+  `volumeFactor ${a1.volumeFactor}, adjust ${a1.sessionsAdjust}`);
+T("No volume-cut note is raised for it",
+  !a1.notes.some(n=>/trimmed|dropped to/i.test(n.text)),
+  JSON.stringify(a1.notes.map(n=>n.text)));
+
+// An unblocked week with nothing logged SHOULD still be penalised.
+const u1b = base();
+u1b.planStart = dateKey(addDays(monday,-14));
+const a1b = computeAdaptation(u1b);
+T("An ordinary missed fortnight IS still penalised (the guard isn't a blanket amnesty)",
+  a1b.volumeFactor < 1, `volumeFactor ${a1b.volumeFactor}`);
+
+// Detraining is real: being away legitimately costs fitness even though it
+// doesn't count as poor adherence. Those are two different things.
+const f1 = deriveFitness(u1);
+const fresh = deriveFitness({...base(), planStart: dateKey(monday)});
+T("Fitness still decays across time off (detraining is real)",
+  f1.vdot < fresh.vdot, `after 2 weeks away ${f1.vdot.toFixed(2)} vs fresh ${fresh.vdot.toFixed(2)}`);
+
+// ---- 2. Does an added session survive illness / a race?
+H("2. Added sessions vs illness and races");
+const u2 = base();
+u2.coachOverrides = { extraSessions:[{weekday:2,type:"upper",fromWeek:1}],
+                      illness:{level:"systemic",until:dateKey(addDays(monday,6))} };
+const p2 = buildPlan(u2, computeAdaptation(u2));
+T("Systemic illness also clears coach-added sessions",
+  p2.weeks[0].days.every(d=>!d.session && !d.extraSession),
+  p2.weeks[0].days.filter(d=>d.extraSession).map(d=>d.dateKey).join(",") || "clear");
+
+const u2b = base();
+const raceKey = dateKey(addDays(monday,3));
+u2b.coachOverrides = { extraSessions:[{weekday:3,type:"upper",fromWeek:1}],
+                       races:[{dateKey:raceKey,meters:5000,label:"parkrun"}] };
+const p2b = buildPlan(u2b, computeAdaptation(u2b));
+const rd = p2b.weeks[0].days.find(d=>d.dateKey===raceKey);
+T("A race day carries no extra strength session", rd && !rd.extraSession,
+  rd?.extraSession ? "strength stacked onto race day" : "clear");
+const dayBefore = p2b.weeks[0].days.find(d=>d.dateKey===dateKey(addDays(monday,2)));
+T("The day before a race carries no extra session", dayBefore && !dayBefore.extraSession,
+  dayBefore?.extraSession ? "strength on race eve" : "clear");
+
+// ---- 3. Race outside the plan window
+H("3. Race outside the plan");
+const u3 = base();
+const far = dateKey(addDays(monday, 400));
+const r3 = coachRespond(`I signed up for a 10k`, {user:u3, plan:buildPlan(u3,computeAdaptation(u3)), adaptation:computeAdaptation(u3), today:monday});
+T("A race with no date asks for one rather than guessing",
+  r3.actions.length === 0 && /when is it/i.test(r3.reply), r3.intent);
+
+// ---- 4. Race while injured
+H("4. Race during an injury softening window");
+const u4 = base();
+u4.coachOverrides = { races:[{dateKey:raceKey,meters:5000,label:"parkrun"}],
+                      softenUntil: dateKey(addDays(monday,6)) };
+const p4 = buildPlan(u4, computeAdaptation(u4));
+const rd4 = p4.weeks[0].days.find(d=>d.session?.isRace);
+T("A race during injury is flagged, not silently left as-is",
+  rd4 && (rd4.session.postponeAdvised || /hurt|injur|sore/i.test(rd4.session.lines[0])),
+  rd4 ? rd4.session.lines[0].slice(0,70) : "no race day");
+
+// ---- 5. Pruning expired state
+H("5. Expired coach state is cleaned up");
+const stale = { illness:{level:"mild",until:dateKey(addDays(monday,-10))},
+                effortOnly:{until:dateKey(addDays(monday,-9)),reason:"heat"},
+                races:[{dateKey:dateKey(addDays(monday,-20)),meters:5000}],
+                blockedDates:[dateKey(addDays(monday,-30))], moves:{} };
+const pruned = pruneCoachOverrides(stale, monday);
+T("Expired illness is cleared", !pruned || !pruned.illness, JSON.stringify(pruned?.illness));
+T("Expired effort-only is cleared", !pruned || !pruned.effortOnly, JSON.stringify(pruned?.effortOnly));
+T("Past races are pruned", !pruned || !(pruned.races||[]).length, JSON.stringify(pruned?.races));
+
+// ---- 6. Overlapping blocks
+H("6. Overlaps don't corrupt a week");
+const u6 = base();
+u6.coachOverrides = { blockedDates:[dateKey(addDays(monday,1))],
+                      moves:{[dateKey(addDays(monday,1))]:dateKey(addDays(monday,2))},
+                      illness:{level:"mild",until:dateKey(addDays(monday,4))},
+                      effortOnly:{until:dateKey(addDays(monday,4)),reason:"heat"},
+                      extraSessions:[{weekday:5,type:"full",fromWeek:1}] };
+const p6 = buildPlan(u6, computeAdaptation(u6));
+T("Every day is either rest or has a valid session",
+  p6.weeks[0].days.every(d => d.isRest ? !d.session : (d.session && d.session.label && d.session.minutes>0)),
+  "malformed day");
+T("No day has a session while also marked rest",
+  !p6.weeks[0].days.some(d=>d.isRest && d.session));
+T("Blocked day stayed clear despite the move",
+  p6.weeks[0].days.find(d=>d.dateKey===dateKey(addDays(monday,1))).isRest);
+
+// ---- 7. Scheduled count sanity
+H("7. Scheduled count never goes negative or absurd");
+const u7 = base();
+u7.coachOverrides = { blockedDates: Array.from({length:7},(_,i)=>dateKey(addDays(monday,i))) };
+T("Scheduled sessions for a fully blocked week is 0, not negative",
+  sessionsScheduledForWeek(u7,1) >= 0 && sessionsScheduledForWeek(u7,1) <= 4,
+  String(sessionsScheduledForWeek(u7,1)));
+
+document.getElementById("out").innerHTML =
+  (bad ? `<h2 class="bad">${bad} PROBLEM${bad>1?'S':''} FOUND</h2>` : `<h2>ALL CLEAN</h2>`) + out;
+</script></body></html>

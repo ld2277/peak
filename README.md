@@ -147,7 +147,10 @@ which is why all of it is covered by tests.
 
 Coverage is measured, not assumed: `probe.html` runs 37 realistic phrasings across
 logging, load, plan changes and exercise changes, and reports what each one resolves to.
-All 37 are understood, and `probe-gaps.html` covers a further 35 (illness, races, absence, environment, corrections, safety) — all 35 handled. Run it whenever you change the parsing.
+All 37 are understood. `audit.html` is separate and more important: it tests the
+*interactions* — what happens when illness, a race, a block, a move and an added session all
+land on the same week. Feature-by-feature tests passed while several of those combinations
+were broken. `probe-gaps.html` covers a further 35 (illness, races, absence, environment, corrections, safety) — all 35 handled. Run it whenever you change the parsing.
 
 **It says when it hasn't understood**, and offers examples instead of guessing. A coach that
 silently misinterprets you is worse than one that admits the gap.
@@ -267,7 +270,7 @@ python3 -m http.server 8000
 ```
 
 Open `http://localhost:8000/index.html?demo=1`. Open `/test.html` to run the engine suite
-(277 checks: VDOT math, plan structure, scheduling, volume ramp, intensity, every adaptation
+(305 checks: VDOT math, plan structure, scheduling, volume ramp, intensity, every adaptation
 rule, derived fitness, schedule history, feasibility, and coverage of every requirement).
 
 It must be served over HTTP — `file://` breaks ES module imports.
@@ -413,7 +416,9 @@ sessions, and test results. It asks twice and cannot be undone.
 | `style.css` | Everything visual |
 | `firebase-config.js` | Your Firebase keys |
 | `firestore.rules` | Paste into the Firebase console Rules tab |
-| `test.html` | Engine test harness — open locally |
+| `test.html` | Engine test harness — 305 checks |
+| `probe.html` / `probe-gaps.html` | Measured coach coverage, 72 phrasings |
+| `audit.html` | Interaction audit — overlapping overrides on one week |
 
 ## Editing the training content
 
@@ -424,5 +429,5 @@ targets) lives in `plan-engine.js`.
 ## Cache-busting
 
 `index.html`, `app.js`, `plan-engine.js`, and `coach.js` carry `?v=` on their imports —
-currently `v=27`.
+currently `v=29`.
 Bump them on every deploy that touches CSS or JS, or phones will serve stale copies for days.

@@ -12,12 +12,27 @@
 import {
   dateKey, parseDateKey, addDays, weekdayIndex, WEEKDAYS, WEEKDAYS_SHORT,
   formatDuration, formatPace, INJURY_FOCUS_LABELS, vdotFromRace,
-} from "./plan-engine.js?v=27";
+} from "./plan-engine.js?v=29";
 
 // ---------------------------------------------------------------- text utils
 
+// Deliberately excludes "its", "ill", "well", "hes", "shes" — expanding those
+// would break more than it fixes ("ill" is how people say they're unwell).
+const CONTRACTIONS = {
+  dont: "don't", cant: "can't", wont: "won't", didnt: "didn't", doesnt: "doesn't",
+  isnt: "isn't", wasnt: "wasn't", arent: "aren't", werent: "weren't",
+  couldnt: "couldn't", shouldnt: "shouldn't", wouldnt: "wouldn't",
+  havent: "haven't", hasnt: "hasn't", hadnt: "hadn't",
+  im: "i'm", ive: "i've", youre: "you're", theyre: "they're",
+  thats: "that's", whats: "what's", lets: "let's",
+};
+
+function expandContractions(t) {
+  return t.replace(/\b([a-z]+)\b/g, (w) => CONTRACTIONS[w] || w);
+}
+
 function normalise(text) {
-  return ` ${String(text || "").toLowerCase().replace(/[’']/g, "'").replace(/[^a-z0-9'\s:.\-\/%]/g, " ").replace(/\s+/g, " ").trim()} `;
+  return ` ${String(text || "").toLowerCase().replace(/[’']/g, "'").replace(/[^a-z0-9'\s:.\-\/%]/g, " ").replace(/\s+/g, " ").trim()} `.replace(/\S+/g, (w) => expandContractions(w));
 }
 
 function has(t, ...words) {
@@ -525,7 +540,10 @@ export function coachRespond(message, ctx) {
   const weatherContext = hasAny(t, [" degrees", " outside", " out there", " weather", " forecast"]);
   const systemic = hasAny(t, ILLNESS_SYSTEMIC);
   const mild = !weatherContext && hasAny(t, ILLNESS_MILD);
-  if (hasAny(t, RECOVERED_WORDS) && (systemic || mild || hasAny(t, ILLNESS_GENERAL))) {
+  // If an illness is on record, "feeling better" is enough on its own — asking
+  // them to restate the symptom would be pedantic.
+  if (hasAny(t, RECOVERED_WORDS) &&
+      (systemic || mild || hasAny(t, ILLNESS_GENERAL) || user.coachOverrides?.illness)) {
     return recoveredResponse({ user });
   }
   if (systemic || mild || hasAny(t, ILLNESS_GENERAL)) {
@@ -835,7 +853,7 @@ function exerciseResponse({ t, exercises, missingGear, substitution, user }) {
 
   if (missingGear.length) {
     rules.noGear = [...new Set([...(rules.noGear || []), ...missingGear])];
-    const names = { bar: "a pull-up bar", band: "a resistance band", step: "a bench or step", mat: "a mat" };
+    const names = { bar: "pull-up bar", band: "resistance band", step: "bench or step", mat: "mat" };
     reply = `Noted — no ${missingGear.map((g) => names[g]).join(" or ")}. I've dropped every movement that needs it and the plan will pick alternatives that don't.`;
     actions.push({ type: "setExerciseRules", rules });
   }

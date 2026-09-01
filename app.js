@@ -2,7 +2,7 @@
 // Cache-busting: bump ?v= here and in index.html on every deploy that changes
 // app.js, plan-engine.js, workouts.js, or style.css.
 
-import { firebaseConfig } from "./firebase-config.js?v=27";
+import { firebaseConfig } from "./firebase-config.js?v=29";
 import {
   WORKOUT_FREQ, CARDIO_FREQ, RUN_DURATION, INJURY_FOCUS_LABELS,
   WEEKDAYS, WEEKDAYS_SHORT, COMMITMENT_LOADS, SESSION_COUNTS, SESSION_MINUTES,
@@ -11,9 +11,9 @@ import {
   formatDuration, formatPace, paceToMile, parseTimeToSeconds,
   buildPlan, getWeek, getDayForDate, computeAdaptation, goalAssessment,
   feasibilityReport, deriveFitness, pruneCoachOverrides,
-} from "./plan-engine.js?v=27";
-import { RPE_SCALE, GEAR_LABELS } from "./workouts.js?v=27";
-import { coachRespond } from "./coach.js?v=27";
+} from "./plan-engine.js?v=29";
+import { RPE_SCALE, GEAR_LABELS } from "./workouts.js?v=29";
+import { coachRespond } from "./coach.js?v=29";
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {

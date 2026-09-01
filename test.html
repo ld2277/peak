@@ -31,8 +31,8 @@ import {
   feasibilityReport, achievableVdotGain, EVENT_REQUIREMENTS,
   deriveFitness, sessionsScheduledForWeek, baselineVdot, parseDateKey,
   pruneCoachOverrides,
-} from "./plan-engine.js?v=27";
-import { coachRespond } from "./coach.js?v=27";
+} from "./plan-engine.js?v=29";
+import { coachRespond } from "./coach.js?v=29";
 
 const out = document.getElementById("out");
 let pass = 0, fail = 0;
@@ -944,6 +944,121 @@ check("A log can be deleted outright",
   say("delete yesterday's log").actions.some((x) => x.type === "deleteLog"));
 check("Undo never carries other side effects",
   say("undo that").actions.length === 1);
+
+section("Interactions between coach features");
+
+function userWith(co, weeksBack = 0) {
+  const uu = mkUser();
+  uu.planStart = dateKey(addDays(monday, -weeksBack * 7));
+  uu.coachOverrides = co;
+  return uu;
+}
+
+// Being away is not the same as failing to train. The coach promises a blocked
+// span won't count against adherence — this holds it to that.
+const away = userWith({ blockedDates: Array.from({ length: 14 }, (_, i) => dateKey(addDays(monday, -14 + i))) }, 2);
+const awayAdapt = computeAdaptation(away);
+check("A blocked holiday doesn't cut volume", awayAdapt.volumeFactor === 1, String(awayAdapt.volumeFactor));
+check("A blocked holiday doesn't drop a session", awayAdapt.sessionsAdjust === 0, String(awayAdapt.sessionsAdjust));
+check("Nothing scheduled in a fully blocked week", sessionsScheduledForWeek(away, 1) === 0,
+  String(sessionsScheduledForWeek(away, 1)));
+check("But an ordinary missed fortnight IS still penalised",
+  computeAdaptation(userWith({}, 2)).volumeFactor < 1,
+  "the guard must not become a blanket amnesty");
+check("Fitness still decays across time off — detraining is real",
+  deriveFitness(away).vdot < deriveFitness(userWith({}, 0)).vdot,
+  `${deriveFitness(away).vdot.toFixed(2)} vs fresh`);
+
+// Systemic illness clears a week the same way.
+const illWeek = userWith({ illness: { level: "systemic", until: dateKey(addDays(monday, -1)) } }, 1);
+check("An illness week isn't scored as missed sessions either",
+  sessionsScheduledForWeek(illWeek, 1) < 4, String(sessionsScheduledForWeek(illWeek, 1)));
+
+section("Nothing stacks onto a race or an illness");
+const raceKey2 = dateKey(addDays(monday, 3));
+const raceStack = buildPlan(
+  userWith({ extraSessions: [{ weekday: 3, type: "upper", fromWeek: 1 }], races: [{ dateKey: raceKey2, meters: 5000, label: "parkrun" }] }),
+  computeAdaptation(userWith({})));
+const rDay = raceStack.weeks[0].days.find((d) => d.dateKey === raceKey2);
+check("A race day carries nothing else", !!rDay?.session?.isRace && !rDay.extraSession);
+check("The day before a race is cleared of extras",
+  !raceStack.weeks[0].days.find((d) => d.dateKey === dateKey(addDays(monday, 2)))?.extraSession);
+
+const illStack = buildPlan(
+  userWith({ extraSessions: [{ weekday: 2, type: "upper", fromWeek: 1 }], illness: { level: "systemic", until: dateKey(addDays(monday, 6)) } }),
+  computeAdaptation(userWith({})));
+check("Systemic illness clears added sessions too",
+  illStack.weeks[0].days.every((d) => !d.session && !d.extraSession),
+  "an added session must not survive a fever");
+
+check("A race during an injury window is flagged", (() => {
+  const p = buildPlan(userWith({ races: [{ dateKey: raceKey2, meters: 5000, label: "parkrun" }], softenUntil: dateKey(addDays(monday, 6)) }),
+    computeAdaptation(userWith({})));
+  const d = p.weeks[0].days.find((x) => x.session?.isRace);
+  return d && /something hurts/i.test(d.session.lines[0]);
+})(), "racing injured must not pass silently");
+
+section("Expired coach state is cleaned up");
+const staleCo2 = {
+  illness: { level: "mild", until: dateKey(addDays(monday, -10)) },
+  effortOnly: { until: dateKey(addDays(monday, -9)), reason: "heat" },
+  races: [{ dateKey: dateKey(addDays(monday, -20)), meters: 5000 }],
+  blockedDates: [dateKey(addDays(monday, -30))], moves: {},
+};
+const pruned2 = pruneCoachOverrides(staleCo2, monday);
+check("Expired illness is dropped", !pruned2.illness);
+check("Expired effort-only is dropped", !pruned2.effortOnly);
+check("Past races are dropped", pruned2.races.length === 0);
+check("Live state survives pruning", (() => {
+  const live = { illness: { level: "mild", until: dateKey(addDays(monday, 3)) }, blockedDates: [], moves: {}, races: [] };
+  return pruneCoachOverrides(live, monday) === null;
+})(), "nothing stale means no rewrite");
+
+section("Overlapping overrides never corrupt a week");
+const messy = buildPlan(userWith({
+  blockedDates: [dateKey(addDays(monday, 1))],
+  moves: { [dateKey(addDays(monday, 1))]: dateKey(addDays(monday, 2)) },
+  illness: { level: "mild", until: dateKey(addDays(monday, 4)) },
+  effortOnly: { until: dateKey(addDays(monday, 4)), reason: "heat" },
+  extraSessions: [{ weekday: 5, type: "full", fromWeek: 1 }],
+  softenUntil: dateKey(addDays(monday, 2)),
+}), computeAdaptation(userWith({})));
+check("Every day is coherent under five overlapping overrides",
+  messy.weeks.flatMap((w) => w.days).every((d) => d.isRest ? !d.session : (d.session && d.session.label && d.session.minutes > 0)));
+check("No day is both rest and scheduled",
+  !messy.weeks.flatMap((w) => w.days).some((d) => d.isRest && d.session));
+check("A blocked day stays clear even with a move pointing at it",
+  messy.weeks[0].days.find((d) => d.dateKey === dateKey(addDays(monday, 1))).isRest);
+check("Every session still has gear listed",
+  messy.weeks.flatMap((w) => w.days).filter((d) => d.session).every((d) => Array.isArray(d.session.gear)));
+
+section("How people actually type");
+
+// Every contraction-based rule silently missed "dont" and "cant", which is
+// how a large share of people type. That was most of the vocabulary.
+check("'I dont have a pull-up bar' is understood",
+  say("I dont have a pull-up bar").intent === "exerciseRules", say("I dont have a pull-up bar").intent);
+check("'I cant train Thursday' is understood",
+  say("I cant train Thursday").intent === "unavailable", say("I cant train Thursday").intent);
+check("'im really stressed' is understood", say("im really stressed").intent === "lifeLoad");
+check("'didnt manage today' is understood", say("didnt manage today").intent === "missed");
+check("'ive got a cold' is understood", say("ive got a cold").intent === "illness");
+check("Apostrophe forms still work too", say("I don't have a pull-up bar").intent === "exerciseRules");
+check("'ill' is not mangled into \"i'll\"", say("I feel ill").intent === "illness",
+  "expanding that contraction would break how people say they're unwell");
+check("Missing-kit copy reads correctly",
+  /no pull-up bar/.test(say("I dont have a pull-up bar").reply),
+  say("I dont have a pull-up bar").reply.slice(0, 50));
+
+// "feeling better" needs no restatement of the symptom once illness is on record.
+check("Recovery is understood on its own when an illness is active", (() => {
+  const uu = mkUser(); uu.planStart = dateKey(monday);
+  uu.coachOverrides = { illness: { level: "mild", until: dateKey(addDays(monday, 2)) } };
+  const r = coachRespond("feeling better now", { user: uu, plan: buildPlan(uu, computeAdaptation(uu)), adaptation: computeAdaptation(uu), today: monday });
+  return r.intent === "recovered";
+})());
+check("But 'feeling better' with no illness on record isn't a recovery",
+  say("feeling better now").intent !== "recovered", say("feeling better now").intent);
 
 section("Sample week output");
 u = mkUser(); a = computeAdaptation(u); plan = buildPlan(u, a);

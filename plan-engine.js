@@ -5,7 +5,7 @@
 import {
   WARMUPS, COOLDOWNS, strengthBlock, conditioningBlock, prehabBlock,
   MOBILITY_FLOW, INJURY_FOCUS_LABELS,
-} from "./workouts.js?v=27";
+} from "./workouts.js?v=29";
 
 export { INJURY_FOCUS_LABELS };
 
@@ -628,16 +628,17 @@ function applyCoachOverrides(dayEntries, user, makeSession, weekNum) {
       isRace: true,
     };
     d.isRest = false;
+    d.extraSession = null; // nothing else goes on a race day
 
     // Protect the day before and the day after.
     const before = byKey[dateKey(addDays(d.date, -1))];
     if (before && before.session && !before.session.isRace) {
-      before.session = null; before.isRest = true; before.raceTaper = "before";
+      before.session = null; before.extraSession = null; before.isRest = true; before.raceTaper = "before";
     }
     const after = byKey[dateKey(addDays(d.date, 1))];
     if (after && after.session && !after.session.isRace &&
         ["intervals", "tempo", "long", "test"].includes(after.session.type)) {
-      after.session = null; after.isRest = true; after.raceTaper = "after";
+      after.session = null; after.extraSession = null; after.isRest = true; after.raceTaper = "after";
     }
   }
 
@@ -663,13 +664,15 @@ function applyCoachOverrides(dayEntries, user, makeSession, weekNum) {
     for (const d of dayEntries) {
       if (!d.session || d.date > until) continue;
       const s = d.session;
-      if (s.type === "test") {
+      if (s.type === "test" || s.type === "race") {
         // A test must never be swapped to another modality. A bike time trial
         // cannot calibrate running paces, and a run done hurt gives a slow,
         // unrepresentative result — either way the number would then reset
         // every pace in the plan. Postponing is the only honest option.
         s.lines = [
-          `⚕️ Coach note: don't time-trial on something that hurts. Postpone this test until it's settled — a result set while injured would recalibrate every pace in your plan off a number that isn't you, and cross-training can't substitute because it measures a different engine.`,
+          s.type === "race"
+            ? `⚕️ Coach note: you've told me something hurts. Racing on it is how a niggle becomes months off — and a race run injured gives a slow time that would then recalibrate every pace in your plan. Sit this one out, or treat it as a easy run and ignore the clock.`
+            : `⚕️ Coach note: don't time-trial on something that hurts. Postpone this test until it's settled — a result set while injured would recalibrate every pace in your plan off a number that isn't you, and cross-training can't substitute because it measures a different engine.`,
           ...s.lines,
         ];
         s.postponeAdvised = true;
@@ -919,13 +922,25 @@ export function pruneCoachOverrides(co, today = new Date()) {
 
   const blockedDates = (co.blockedDates || []).filter(keep);
   const moves = Object.fromEntries(Object.entries(co.moves || {}).filter(([from, to]) => keep(from) && keep(to)));
+  const races = (co.races || []).filter((r) => keep(r.dateKey));
+
+  // Windowed state expires on its own date; drop it once it's behind us so it
+  // doesn't sit in storage forever pretending to still apply.
+  const expired = (v) => v?.until && parseDateKey(v.until) < cutoff;
+  const dropIllness = expired(co.illness);
+  const dropEffort = expired(co.effortOnly);
 
   const changed =
     blockedDates.length !== (co.blockedDates || []).length ||
-    Object.keys(moves).length !== Object.keys(co.moves || {}).length;
+    Object.keys(moves).length !== Object.keys(co.moves || {}).length ||
+    races.length !== (co.races || []).length ||
+    dropIllness || dropEffort;
 
   if (!changed) return null;
-  return { ...co, blockedDates, moves };
+  const next = { ...co, blockedDates, moves, races };
+  if (dropIllness) delete next.illness;
+  if (dropEffort) delete next.effortOnly;
+  return next;
 }
 
 export function getWeek(plan, n) {
@@ -968,7 +983,24 @@ export function sessionsScheduledForWeek(user, weekNum) {
   // adherence honest instead of flattering.
   const extras = (user.coachOverrides?.extraSessions || [])
     .filter((e) => (e.fromWeek || 1) <= weekNum).length;
-  return val + extras;
+  const total = val + extras;
+
+  // Days the athlete was blocked out of — on holiday, or too ill to train —
+  // were never available, so they cannot count as sessions they missed.
+  // Fitness still decays across such a week (detraining is real); what changes
+  // is that the plan stops treating it as a failure of adherence.
+  const co = user.coachOverrides || {};
+  const blocked = new Set(co.blockedDates || []);
+  const illUntil = co.illness?.level === "systemic" && co.illness.until
+    ? parseDateKey(co.illness.until) : null;
+  const planStart = mondayOnOrBefore(parseDateKey(user.planStart));
+  let unavailable = 0;
+  for (let i = 0; i < 7; i++) {
+    const d = addDays(planStart, (weekNum - 1) * 7 + i);
+    if (blocked.has(dateKey(d)) || (illUntil && d <= illUntil)) unavailable++;
+  }
+  if (!unavailable) return total;
+  return Math.max(0, total - Math.round((unavailable * total) / 7));
 }
 
 export function deriveFitness(user) {
@@ -1059,6 +1091,9 @@ export function computeAdaptation(user) {
   const weeklyAdherence = [];
   for (const w of windowWeeks) {
     const scheduled = sessionsScheduledForWeek(user, w);
+    // A week the athlete was away for has nothing to adhere to. Scoring it as
+    // 0% would punish them for a holiday the coach said wouldn't count.
+    if (scheduled === 0) continue;
     let weekDone = 0;
     for (let i = 0; i < 7; i++) {
       const key = dateKey(addDays(planStart, (w - 1) * 7 + i));
