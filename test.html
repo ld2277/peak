@@ -31,8 +31,8 @@ import {
   feasibilityReport, achievableVdotGain, EVENT_REQUIREMENTS,
   deriveFitness, sessionsScheduledForWeek, baselineVdot, parseDateKey,
   pruneCoachOverrides,
-} from "./plan-engine.js?v=34";
-import { coachRespond } from "./coach.js?v=34";
+} from "./plan-engine.js?v=38";
+import { coachRespond } from "./coach.js?v=38";
 
 const out = document.getElementById("out");
 let pass = 0, fail = 0;
@@ -704,10 +704,15 @@ const rBusyAdd = coachRespond("add a strength session on Tuesdays", {
   user: busyUser, plan: buildPlan(busyUser, computeAdaptation(busyUser)),
   adaptation: computeAdaptation(busyUser), today: monday,
 });
-check("It refuses to add onto a hard commitment day",
-  !rBusyAdd.actions.some((a) => a.type === "addRecurringSessions" && a.weekdays.includes(1)),
+// This previously asserted the coach REFUSED to add onto a hard-commitment day.
+// That was wrong: the athlete asked, and being told twice and still saying no
+// isn't coaching. The contract now is comply, and flag the load.
+check("It adds onto a hard commitment day when asked",
+  rBusyAdd.actions.some((a) => a.type === "addRecurringSessions" && a.weekdays.includes(1)),
   JSON.stringify(rBusyAdd.actions));
-check("And says why", /hard commitment/i.test(rBusyAdd.reply), rBusyAdd.reply.slice(0, 160));
+check("And flags the extra load rather than accepting it silently",
+  /hard commitment/i.test(rBusyAdd.reply) && /your call/i.test(rBusyAdd.reply),
+  rBusyAdd.reply.slice(0, 180));
 
 // Removal.
 const remUser = mkUser();
@@ -840,6 +845,15 @@ check("'why is my easy pace so slow' explains instead of raising load", (() => {
 })(), say("why is my easy pace so slow").intent);
 check("Interval rationale is explained", say("why am I doing intervals").intent === "explain");
 check("Deloads are explained", say("what's a deload week").intent === "explain");
+// This used to fall through to "I didn't follow that" whenever today happened
+// to be a rest day, which made it look broken depending on the weekday.
+check("'what's the point of this session' answers on a training day AND a rest day", (() => {
+  const uu = mkUser(); uu.planStart = dateKey(monday);
+  const pl = buildPlan(uu, computeAdaptation(uu));
+  const aa = computeAdaptation(uu);
+  return pl.weeks[0].days.every((d) =>
+    coachRespond("what's the point of this session", { user: uu, plan: pl, adaptation: aa, today: d.date }).intent === "explain");
+})(), "must not depend on which weekday it is");
 check("Explanations never change the plan",
   ["why am I doing intervals", "what's a deload week", "why is my easy pace so slow"]
     .every((m) => say(m).actions.length === 0));
@@ -1180,6 +1194,49 @@ check("Markup in a message is never echoed back as markup", (() => {
   // app, which is why every render path goes through escapeHtml.
   return typeof r.reply === "string";
 })());
+
+section("The athlete's explicit request wins");
+
+// The coach used to refuse to put a session on a hard-commitment day and offer
+// no way round it. Being told twice and still saying no is not coaching.
+const busyUser2 = mkUser({ schedule: { sessionsPerWeek: 4, minutesPerSession: 60,
+  commitments: { 1: { load: "hard", label: "Soccer" }, 3: { load: "hard", label: "Soccer" } } } });
+busyUser2.planStart = dateKey(monday);
+const busyCtx = { user: busyUser2, plan: buildPlan(busyUser2, computeAdaptation(busyUser2)),
+  adaptation: computeAdaptation(busyUser2), today: monday };
+const rBusy2 = coachRespond("Please adjust and add 2 strength sessions (focus upper body with pull-ups and weights): one on Tuesdays and one on Thursdays", busyCtx);
+const busyAdd = rBusy2.actions.find((a) => a.type === "addRecurringSessions");
+check("Sessions are added on hard-commitment days when explicitly asked",
+  !!busyAdd && busyAdd.weekdays.includes(1) && busyAdd.weekdays.includes(3),
+  JSON.stringify(rBusy2.actions.map((a) => a.type)));
+check("…and the extra load is flagged rather than silently accepted",
+  /hard commitment/i.test(rBusy2.reply) && /your call/i.test(rBusy2.reply));
+check("The engine actually places them on those days", (() => {
+  busyUser2.coachOverrides = { extraSessions: [{ weekday: 1, type: "upper", fromWeek: 1 }, { weekday: 3, type: "upper", fromWeek: 1 }] };
+  const p = buildPlan(busyUser2, computeAdaptation(busyUser2));
+  const tue = p.weeks[0].days[1], thu = p.weeks[0].days[3];
+  return !!tue.session && !!thu.session && !!tue.commitment && !!thu.commitment;
+})(), "a commitment day must be able to carry a requested session");
+
+section("Insisting works without rephrasing");
+const ctxP = coachCtx();
+const first = coachRespond("add an easy run on Mondays", ctxP);
+check("A refusal hands back something to resume", !!first.pending, JSON.stringify(first.pending));
+const second = coachRespond("No please add those sessions", { ...ctxP, pending: first.pending });
+check("'No please add those sessions' is read as insistence, not refusal",
+  second.actions.some((a) => a.type === "addRecurringSessions"), second.intent);
+check("A plain 'do it anyway' works too",
+  coachRespond("do it anyway", { ...ctxP, pending: first.pending }).actions.some((a) => a.type === "addRecurringSessions"));
+check("An actual refusal is respected",
+  coachRespond("no thanks, leave it", { ...ctxP, pending: first.pending }).actions.length === 0,
+  coachRespond("no thanks, leave it", { ...ctxP, pending: first.pending }).intent);
+check("Affirmations do nothing when there's nothing pending",
+  coachRespond("do it anyway", ctxP).intent === "unknown");
+check("A long new request isn't hijacked by a stale pending",
+  coachRespond("I ran 45 minutes easy this morning and it felt absolutely fine thanks", { ...ctxP, pending: first.pending }).intent === "logActual");
+check("Doubling a run is described as a double run, not as strength",
+  /double run day/i.test(coachRespond("add it anyway", { ...ctxP, pending: first.pending }).reply),
+  "copy written for strength read as nonsense for a run");
 
 section("Sample week output");
 u = mkUser(); a = computeAdaptation(u); plan = buildPlan(u, a);

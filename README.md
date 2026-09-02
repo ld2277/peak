@@ -200,6 +200,15 @@ Each of these was originally mishandled: chest tightness was treated as a niggle
 workout**. Silently doing the wrong thing is worse than admitting the gap, so all three are
 now checked before anything else and covered by tests.
 
+**Your explicit request wins.** The coach warns; it does not veto. Ask for a session on a day
+you've marked as a hard commitment and it adds it, tells you that day now carries both, and
+leaves the judgement with you. Where it does hold back — stacking a second *run* on a day that
+already has one — a simple "add it anyway" carries it out. Being told twice and still saying
+no isn't coaching, it's an obstacle.
+
+That also means the coach remembers what it just declined, so you can insist rather than
+rephrase. "No please add those sessions" resolves correctly, despite starting with "no".
+
 **What it won't do.** It can't change your goal or deadline — that runs the feasibility gate,
 so it hands you to the goal editor instead of quietly retargeting your plan. And it isn't a
 physio: it takes the load off and tells you to get it looked at, but it never diagnoses.
@@ -301,7 +310,7 @@ python3 -m http.server 8000
 ```
 
 Open `http://localhost:8000/index.html?demo=1`. Open `/test.html` to run the engine suite
-(345 checks: VDOT math, plan structure, scheduling, volume ramp, intensity, every adaptation
+(356 checks: VDOT math, plan structure, scheduling, volume ramp, intensity, every adaptation
 rule, derived fitness, schedule history, feasibility, and coverage of every requirement).
 
 It must be served over HTTP — `file://` breaks ES module imports.
@@ -471,5 +480,5 @@ targets) lives in `plan-engine.js`.
 ## Cache-busting
 
 `index.html`, `app.js`, `plan-engine.js`, and `coach.js` carry `?v=` on their imports —
-currently `v=34`.
+currently `v=38`.
 Bump them on every deploy that touches CSS or JS, or phones will serve stale copies for days.

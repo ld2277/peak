@@ -5,7 +5,7 @@
 import {
   WARMUPS, COOLDOWNS, strengthBlock, conditioningBlock, prehabBlock,
   MOBILITY_FLOW, INJURY_FOCUS_LABELS,
-} from "./workouts.js?v=34";
+} from "./workouts.js?v=38";
 
 export { INJURY_FOCUS_LABELS };
 
@@ -575,7 +575,8 @@ function applyCoachOverrides(dayEntries, user, makeSession, weekNum) {
     if (weekNum != null && (extra.fromWeek || 1) > weekNum) continue;
     const d = dayEntries.find((x) => x.weekdayIndex === extra.weekday);
     if (!d || d.blocked || !makeSession) continue;
-    if (d.commitment && d.commitment.load === "hard") continue;
+    // Hard-commitment days are avoided by the scheduler, but NOT off-limits to
+    // a session the athlete explicitly asked for. They know their own week.
     if (d.isRest) {
       d.session = makeSession(extra.type);
       d.isRest = false;

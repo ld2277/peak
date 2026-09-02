@@ -12,7 +12,7 @@
 import {
   dateKey, parseDateKey, addDays, weekdayIndex, WEEKDAYS, WEEKDAYS_SHORT,
   formatDuration, formatPace, INJURY_FOCUS_LABELS, vdotFromRace,
-} from "./plan-engine.js?v=34";
+} from "./plan-engine.js?v=38";
 
 // ---------------------------------------------------------------- text utils
 
@@ -552,6 +552,18 @@ function parseSpanDays(t) {
   return n * 30;
 }
 
+// When the coach declines to do something, it hands back a `pending` payload.
+// If the next message is the athlete insisting, that payload is re-run with
+// force. Without this, "no, add them anyway" fell through to "I didn't follow
+// that one" — the most infuriating possible reply to someone repeating themself.
+const AFFIRM_WORDS = [" yes", " yeah", " yep", " yup", " do it", " go ahead", " please do",
+  " anyway", " still want", " i insist", " just do it", " add them", " add those",
+  " please add", " override", " do it anyway", " add it anyway", " confirm", " i know",
+  " thats fine", " that's fine", " i still", " regardless"];
+
+const DECLINE_WORDS = [" no thanks", " leave it", " forget it", " never mind", " nevermind",
+  " dont bother", " don't bother", " cancel", " skip it", " leave that"];
+
 // ---------------------------------------------------------------- intents
 
 // Ordered by priority: pain is checked before anything else, because a plan
@@ -595,6 +607,18 @@ function coachRespondCore(message, ctx) {
   const todayKey = dateKey(today);
 
   if (!t.trim()) return { intent: "empty", reply: "Tell me what happened and I'll sort the plan out.", actions: [] };
+
+  // ---- Follow-up to something the coach just declined. Checked first, and
+  //      affirmation beats decline so "No please add those sessions" — which
+  //      starts with "no" but plainly means yes — resolves correctly.
+  if (ctx.pending && tokensFor(t).length <= 16) {
+    const affirms = hasAny(t, AFFIRM_WORDS);
+    const declines = hasAny(t, DECLINE_WORDS);
+    if (affirms) return resumePending(ctx.pending, { t, user, plan, adaptation, today });
+    if (declines) {
+      return { intent: "declined", reply: "Fine — left exactly as it was.", actions: [] };
+    }
+  }
 
   const dates = detectDates(t, today);
   const minutes = detectMinutes(t);
@@ -810,7 +834,7 @@ function coachRespondCore(message, ctx) {
   // ---- 5b. Explanations. Checked before the feel words, because "why is my
   //           easy pace so slow" contains "easy" and used to RAISE the load.
   if (/\bwhy\b|\bwhat's the point\b|\bwhat is the point\b|\bwhat's a\b|\bwhat is a\b|\bhow does\b/.test(t)) {
-    const ex = explainResponse({ t, plan, adaptation });
+    const ex = explainResponse({ t, plan, adaptation, today });
     if (ex) return ex;
   }
 
@@ -959,8 +983,9 @@ function detectRearrange(t, today, plan, adaptation) {
     if (dst.session) {
       return {
         intent: "move",
-        reply: `${WEEKDAYS[wds[0]]} already has ${dst.session.label.toLowerCase()} on it, and I won't stack two sessions on one day. Tell me which day to clear and I'll move both.`,
+        reply: `${WEEKDAYS[wds[0]]} already has ${dst.session.label.toLowerCase()} on it. Say "do it anyway" and I'll put both on that day, or tell me which one to clear.`,
         actions: [],
+        pending: { kind: "move", from: src.dateKey, to: dst.dateKey, weekday: wds[0], label: src.session.label.toLowerCase() },
       };
     }
     return {
@@ -1207,7 +1232,25 @@ function progressResponse({ user, plan, adaptation }) {
   return { intent: "progress", reply, actions: [] };
 }
 
-function addSessionsResponse({ t, weekdays, type, user, plan, adaptation }) {
+// Re-runs whatever the coach last refused, this time doing as it was told.
+function resumePending(pending, { t, user, plan, adaptation, today }) {
+  if (pending.kind === "addSessions") {
+    return addSessionsResponse({
+      t, weekdays: pending.weekdays, type: pending.type,
+      user, plan, adaptation, force: true,
+    });
+  }
+  if (pending.kind === "move") {
+    return {
+      intent: "move",
+      reply: `Done — moved the ${pending.label} to ${WEEKDAYS[pending.weekday]}, on top of what was already there. Two sessions in a day is fine occasionally; just don't make it the pattern.`,
+      actions: [{ type: "moveSession", from: pending.from, to: pending.to }],
+    };
+  }
+  return { intent: "unknown", reply: "I've lost track of what you're confirming — say it again in full and I'll sort it.", actions: [] };
+}
+
+function addSessionsResponse({ t, weekdays, type, user, plan, adaptation, force = false }) {
   if (!weekdays.length) {
     return {
       intent: "addSession",
@@ -1220,16 +1263,18 @@ function addSessionsResponse({ t, weekdays, type, user, plan, adaptation }) {
   const commitments = user.schedule.commitments || {};
   const existing = (user.coachOverrides?.extraSessions || []);
 
-  const added = [], clashCommit = [], clashPlan = [], already = [], doubled = [];
+  const added = [], onCommitment = [], clashPlan = [], already = [], doubled = [];
   for (const wd of weekdays) {
     if (existing.some((e) => e.weekday === wd)) { already.push(wd); continue; }
-    if (commitments[wd] && commitments[wd].load === "hard") { clashCommit.push(wd); continue; }
+    // A hard commitment is a reason to warn, not a reason to refuse. The
+    // athlete asked for this and knows their own week better than the plan does.
+    if (commitments[wd] && commitments[wd].load === "hard") onCommitment.push(wd);
     // A day that already has a session is fine for strength, mobility or
     // conditioning — doubling those up with a run is standard practice and
     // actually protects the easy/hard split. A second RUNNING session is not.
     const wk = plan.weeks.find((w) => w.num === adaptation.currentWeek) || plan.weeks[0];
     const day = wk?.days.find((d) => d.weekdayIndex === wd);
-    const stackable = ["upper", "lower", "full", "mobility", "conditioning"].includes(kind);
+    const stackable = force || ["upper", "lower", "full", "mobility", "conditioning"].includes(kind);
     if (day && !day.isRest && !stackable) { clashPlan.push(wd); continue; }
     if (day && !day.isRest) doubled.push(wd);
     added.push(wd);
@@ -1240,6 +1285,7 @@ function addSessionsResponse({ t, weekdays, type, user, plan, adaptation }) {
     : [];
 
   const dayNames = (list) => list.map((i) => `${WEEKDAYS[i]}s`).join(" and ");
+  const isAre = (list) => (list.length > 1 ? "are" : "is");
   // "every Tuesday and Thursday", not "every Tuesdays and Thursdays".
   const dayNamesEach = (list) => list.map((i) => WEEKDAYS[i]).join(" and ");
   const article = /^[aeiou]/i.test(label) ? "an" : "a";
@@ -1253,9 +1299,17 @@ function addSessionsResponse({ t, weekdays, type, user, plan, adaptation }) {
     reply += ` On test weeks I'll leave the time-trial day clear — nothing goes near a max effort, because that result resets every pace in your plan.`;
   }
   if (already.length) reply += `${reply ? " " : ""}You already had one on ${dayNames(already)}, so I left that alone.`;
-  if (clashCommit.length) reply += `${reply ? " " : ""}${dayNames(clashCommit)} is marked as a hard commitment, so I've left it clear — that day is already loaded.`;
-  if (doubled.length) reply += `${reply ? " " : ""}${dayNames(doubled)} already had a session, so this goes alongside it as a second piece of work that day — strength on a running day is fine, and keeps your easy days easy.`;
-  if (clashPlan.length) reply += `${reply ? " " : ""}${dayNames(clashPlan)} already has a running session, so I didn't stack a second run on top. Move the existing one first if you want it there.`;
+  if (onCommitment.length) {
+    const many = onCommitment.length > 1;
+    reply += `${reply ? " " : ""}Note that ${dayNames(onCommitment)} ${many ? "are" : "is"} already marked as ${many ? "hard commitments" : "a hard commitment"}, so ${many ? "those days now carry" : "that day now carries"} both. That's your call and I've done it — but watch how it feels and tell me if it's too much.`;
+  }
+  if (doubled.length) {
+    const isRun = ["easy", "tempo", "intervals", "long", "cardio"].includes(kind);
+    reply += `${reply ? " " : ""}${dayNames(doubled)} already had a session, so this goes alongside it as a second piece of work that day — ` + (isRun
+      ? `that's a double run day. Doubles are advanced training and easy to get wrong, so keep the second one genuinely easy and drop it the moment it starts eating into your quality sessions.`
+      : `strength on a running day is fine, and it keeps your easy days easy.`);
+  }
+  if (clashPlan.length) reply += `${reply ? " " : ""}${dayNames(clashPlan)} already ${clashPlan.length > 1 ? "have" : "has"} a running session, so I didn't stack a second run on top. Say "add it anyway" if you want it there regardless.`;
 
   const totalPerWeek = user.schedule.sessionsPerWeek + existing.length + added.length;
   if (added.length && totalPerWeek >= 6) {
@@ -1264,7 +1318,10 @@ function addSessionsResponse({ t, weekdays, type, user, plan, adaptation }) {
     reply += `\n\nThese sit on top of your ${user.schedule.sessionsPerWeek} planned sessions, so you're now at ${totalPerWeek} a week.`;
   }
 
-  return { intent: "addSession", reply: reply.trim(), actions };
+  const result = { intent: "addSession", reply: reply.trim(), actions };
+  // Remember what was refused, so "add it anyway" can carry it out.
+  if (clashPlan.length) result.pending = { kind: "addSessions", weekdays: clashPlan, type: kind };
+  return result;
 }
 
 function removeSessionsResponse({ t, weekdays, user, plan }) {
@@ -1551,7 +1608,7 @@ function pushResponse({ t, user, plan, adaptation, todayKey }) {
   };
 }
 
-function explainResponse({ t, plan, adaptation }) {
+function explainResponse({ t, plan, adaptation, today = new Date() }) {
   const easy = plan.paces ? formatPace(plan.paces.easy) : null;
 
   if (hasAny(t, [" easy pace", " easy runs", " so slow", " too slow", " easy so"])) {
@@ -1576,7 +1633,7 @@ function explainResponse({ t, plan, adaptation }) {
     };
   }
   if (hasAny(t, [" this session", " today's session", " the point of"])) {
-    const found = plan.weeks.flatMap((w) => w.days).find((d) => d.dateKey === dateKey(new Date()));
+    const found = plan.weeks.flatMap((w) => w.days).find((d) => d.dateKey === dateKey(today));
     if (found?.session) {
       return {
         intent: "explain",
@@ -1584,6 +1641,15 @@ function explainResponse({ t, plan, adaptation }) {
         actions: [],
       };
     }
+    // A rest day is still an answer to "what's the point of this session".
+    // Falling through to "I didn't follow that" made it look broken.
+    return {
+      intent: "explain",
+      reply: found
+        ? `Nothing scheduled today — it's a rest day, and that is the session. You don't get fitter during training, you get fitter recovering from it, so the rest days are doing real work even though they don't feel like it.`
+        : `Today falls outside your plan window, so there's nothing scheduled to explain.`,
+      actions: [],
+    };
   }
   return null;
 }

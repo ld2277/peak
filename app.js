@@ -2,7 +2,7 @@
 // Cache-busting: bump ?v= here and in index.html on every deploy that changes
 // app.js, plan-engine.js, workouts.js, or style.css.
 
-import { firebaseConfig } from "./firebase-config.js?v=34";
+import { firebaseConfig } from "./firebase-config.js?v=38";
 import {
   WORKOUT_FREQ, CARDIO_FREQ, RUN_DURATION, INJURY_FOCUS_LABELS,
   WEEKDAYS, WEEKDAYS_SHORT, COMMITMENT_LOADS, SESSION_COUNTS, SESSION_MINUTES,
@@ -11,9 +11,9 @@ import {
   formatDuration, formatPace, paceToMile, parseTimeToSeconds,
   buildPlan, getWeek, getDayForDate, computeAdaptation, goalAssessment,
   feasibilityReport, deriveFitness, pruneCoachOverrides,
-} from "./plan-engine.js?v=34";
-import { RPE_SCALE, GEAR_LABELS } from "./workouts.js?v=34";
-import { coachRespond } from "./coach.js?v=34";
+} from "./plan-engine.js?v=38";
+import { RPE_SCALE, GEAR_LABELS } from "./workouts.js?v=38";
+import { coachRespond } from "./coach.js?v=38";
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
@@ -1841,7 +1841,13 @@ async function sendToCoach() {
   renderCoach();
 
   try {
-    const res = coachRespond(text, { user, plan, adaptation, today: new Date() });
+    // Hand the coach whatever it last declined to do, so the athlete can simply
+    // insist rather than rephrasing the whole request.
+    const lastCoach = [...(user.chat || [])].reverse().find((m) => m.role === "coach");
+    const res = coachRespond(text, {
+      user, plan, adaptation, today: new Date(),
+      pending: lastCoach?.pending || null,
+    });
     const changed = await applyCoachActions(res.actions || []);
 
     if (changed) {
@@ -1875,7 +1881,10 @@ async function sendToCoach() {
       if (a.type === "addInjuryFocus") changes.push("Prehab added");
     }
 
-    await appendChat({ role: "coach", text: res.reply, at: Date.now(), changes, intent: res.intent });
+    await appendChat({
+      role: "coach", text: res.reply, at: Date.now(), changes, intent: res.intent,
+      ...(res.pending ? { pending: res.pending } : {}),
+    });
     renderCoach();
     if (changed) { renderToday(); renderWeek(); renderPlanOverview(); renderProfile(); }
     if ((res.actions || []).some((a) => a.type === "openGoalEditor")) {
