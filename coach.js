@@ -12,7 +12,7 @@
 import {
   dateKey, parseDateKey, addDays, weekdayIndex, WEEKDAYS, WEEKDAYS_SHORT,
   formatDuration, formatPace, INJURY_FOCUS_LABELS, vdotFromRace,
-} from "./plan-engine.js?v=38";
+} from "./plan-engine.js?v=39";
 
 // ---------------------------------------------------------------- text utils
 
@@ -662,6 +662,15 @@ function coachRespondCore(message, ctx) {
   //           and because the coach changes state — there must always be a way
   //           back that doesn't involve digging through the Profile editors.
   if (hasAny(t, UNDO_WORDS)) {
+    // Claiming to have reverted when there is nothing left to revert is a lie
+    // the athlete can't detect. Check before promising.
+    if (!(user.coachHistory || []).length) {
+      return {
+        intent: "undo",
+        reply: "There's nothing left to undo — I haven't made any changes since the last one you reverted. If something looks wrong, tell me what it should be and I'll set it directly.",
+        actions: [],
+      };
+    }
     return {
       intent: "undo",
       reply: "Reverted my last change. Everything is back to how it was before that message.",
@@ -675,15 +684,30 @@ function coachRespondCore(message, ctx) {
     const toIdx = idx[swapDayFix[1]], fromIdx = idx[swapDayFix[2]];
     const base = weekdayIndex(today);
     const dayFor = (i) => dateKey(addDays(today, i - base <= 0 ? i - base : i - base - 7));
+    const fromKey = dayFor(fromIdx), toKey = dayFor(toIdx);
+    if (!user.logs?.[fromKey]) {
+      return {
+        intent: "moveLog",
+        reply: `I can't find a logged session on ${WEEKDAYS[fromIdx]} to move. Tell me what you did and I'll log it on ${WEEKDAYS[toIdx]} directly.`,
+        actions: [],
+      };
+    }
     return {
       intent: "moveLog",
       reply: `Fixed — moved that session from ${WEEKDAYS[fromIdx]} to ${WEEKDAYS[toIdx]}.`,
-      actions: [{ type: "moveLog", from: dayFor(fromIdx), to: dayFor(toIdx) }],
+      actions: [{ type: "moveLog", from: fromKey, to: toKey }],
     };
   }
 
   if (hasAny(t, DELETE_LOG_WORDS) && (dates.length || hasAny(t, [" log", " session", " workout"]))) {
     const key = dates[0] || todayKey;
+    if (!user.logs?.[key]) {
+      return {
+        intent: "deleteLog",
+        reply: `There's nothing logged for ${prettyShort(key).toLowerCase()}, so there's nothing to remove.`,
+        actions: [],
+      };
+    }
     return {
       intent: "deleteLog",
       reply: `Removed the log for ${prettyShort(key).toLowerCase()}. Your adherence and fitness estimate recalculate without it.`,
@@ -1570,6 +1594,14 @@ function easeResponse({ t, user, plan, adaptation, todayKey }) {
   const step = pct ? Math.min(0.3, parseInt(pct[1], 10) / 100) : 0.12;
   const next = Math.max(0.7, Math.round((current - step) * 100) / 100);
   const persistent = hasAny(t, [" every session", " all the time", " for weeks", " every week", " constantly"]);
+
+  if (next === current) {
+    return {
+      intent: "ease",
+      reply: `You're already at ${Math.round(current * 100)}% — the lowest I'll take you from a chat message, because below that the plan stops being a plan.\n\nIf it's still too much, the honest fix is fewer sessions rather than smaller ones: Profile → Your schedule → Edit. Three you complete beat five you don't.`,
+      actions: [],
+    };
+  }
 
   let reply = `Cut back — volume is now ${Math.round(next * 100)}% of what it was, starting today. Intensity targets stay where they are: when you're tired, the answer is less work, not the same work done worse.`;
 

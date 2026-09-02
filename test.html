@@ -31,8 +31,8 @@ import {
   feasibilityReport, achievableVdotGain, EVENT_REQUIREMENTS,
   deriveFitness, sessionsScheduledForWeek, baselineVdot, parseDateKey,
   pruneCoachOverrides,
-} from "./plan-engine.js?v=38";
-import { coachRespond } from "./coach.js?v=38";
+} from "./plan-engine.js?v=39";
+import { coachRespond } from "./coach.js?v=39";
 
 const out = document.getElementById("out");
 let pass = 0, fail = 0;
@@ -950,14 +950,31 @@ check("They distinguish measured from estimated", /estimate|measured/i.test(rPro
 check("With no test yet, it says so", /Nothing measured yet|estimate/i.test(rProg.reply));
 
 section("Coach — undo is always available");
-check("'undo that' produces an undo action", say("undo that").actions.some((x) => x.type === "undoLast"));
-check("'I logged that wrong' undoes too", say("I logged that wrong").intent === "undo");
-check("A wrong day can be corrected",
-  say("that was Tuesday not Monday").actions.some((x) => x.type === "moveLog"), say("that was Tuesday not Monday").intent);
-check("A log can be deleted outright",
-  say("delete yesterday's log").actions.some((x) => x.type === "deleteLog"));
+// These now need a precondition. They used to pass against an empty user
+// because the coach claimed success regardless — which was the bug.
+function ctxWith(mutate) {
+  const uu = mkUser();
+  uu.planStart = dateKey(monday);
+  uu.logs = {}; uu.tests = {}; uu.coachOverrides = {}; uu.coachHistory = [];
+  mutate(uu);
+  const aa = computeAdaptation(uu);
+  return { user: uu, plan: buildPlan(uu, aa), adaptation: aa, today: monday };
+}
+const undoCtx = ctxWith((u) => { u.coachHistory = [{ at: Date.now(), snap: { coachOverrides: {} } }]; });
+check("'undo that' produces an undo action when there is something to undo",
+  coachRespond("undo that", undoCtx).actions.some((x) => x.type === "undoLast"));
+check("'I logged that wrong' undoes too", coachRespond("I logged that wrong", undoCtx).intent === "undo");
 check("Undo never carries other side effects",
-  say("undo that").actions.length === 1);
+  coachRespond("undo that", undoCtx).actions.length === 1);
+
+const moveCtx = ctxWith((u) => { u.logs[dateKey(monday)] = { done: true, rpe: 5, type: "easy" }; });
+check("A wrong day can be corrected when a log exists",
+  coachRespond("that was Tuesday not Monday", moveCtx).actions.some((x) => x.type === "moveLog"),
+  coachRespond("that was Tuesday not Monday", moveCtx).intent);
+
+const delCtx = ctxWith((u) => { u.logs[dateKey(addDays(monday, -1))] = { done: true, rpe: 5, type: "easy" }; });
+check("A log can be deleted outright when one exists",
+  coachRespond("delete yesterday's log", delCtx).actions.some((x) => x.type === "deleteLog"));
 
 section("Interactions between coach features");
 
@@ -1237,6 +1254,125 @@ check("A long new request isn't hijacked by a stale pending",
 check("Doubling a run is described as a double run, not as strength",
   /double run day/i.test(coachRespond("add it anyway", { ...ctxP, pending: first.pending }).reply),
   "copy written for strength read as nonsense for a run");
+
+section("Multi-turn conversations");
+
+// Every suite so far tested single messages. The last two bugs reported from
+// real use both lived across turns, so this replays whole conversations,
+// applying each action the way the app does and checking state after each one.
+function conversation(messages, startUser) {
+  const u = startUser || (() => { const x = mkUser(); x.planStart = dateKey(monday); return x; })();
+  u.logs = u.logs || {}; u.tests = u.tests || {}; u.coachOverrides = u.coachOverrides || {};
+  u.coachHistory = u.coachHistory || [];
+  const transcript = [];
+
+  for (const msg of messages) {
+    const adapt = computeAdaptation(u);
+    const plan = buildPlan(u, adapt);
+    const lastCoach = [...transcript].reverse().find((x) => x.pending);
+    const res = coachRespond(msg, { user: u, plan, adaptation: adapt, today: monday, pending: lastCoach?.pending || null });
+
+    // Mirror of the app's apply step, minus persistence.
+    const co = { ...u.coachOverrides };
+    let snapped = false;
+    for (const a of res.actions || []) {
+      if (!snapped && a.type !== "undoLast") {
+        u.coachHistory = [...u.coachHistory, { snap: { coachOverrides: JSON.parse(JSON.stringify(u.coachOverrides)) } }].slice(-10);
+        snapped = true;
+      }
+      if (a.type === "undoLast") {
+        const h = [...u.coachHistory]; const last = h.pop();
+        if (last) { u.coachOverrides = last.snap.coachOverrides; u.coachHistory = h; }
+      }
+      else if (a.type === "logActual") u.logs[a.dateKey] = { done: true, rpe: a.session.rpe, targetRpe: a.session.plannedRpe ?? a.session.rpe, type: a.session.type };
+      else if (a.type === "deleteLog") delete u.logs[a.dateKey];
+      else if (a.type === "blockDates") co.blockedDates = [...new Set([...(co.blockedDates || []), ...a.dates])];
+      else if (a.type === "moveSession") co.moves = { ...(co.moves || {}), [a.from]: a.to };
+      else if (a.type === "setLoad") { co.loadFactor = a.factor; co.loadFactorFromWeek = adapt.currentWeek; }
+      else if (a.type === "softenDays") co.softenUntil = dateKey(addDays(monday, a.days));
+      else if (a.type === "setIllness") co.illness = { level: a.level, until: a.until };
+      else if (a.type === "clearIllness") delete co.illness;
+      else if (a.type === "addRace") co.races = [...(co.races || []), { dateKey: a.dateKey, meters: a.meters, label: a.label }];
+      else if (a.type === "removeRace") co.races = (co.races || []).filter((r) => r.dateKey !== a.dateKey);
+      else if (a.type === "setEffortOnly") co.effortOnly = { until: a.until, reason: a.reason };
+      else if (a.type === "setExerciseRules") co.exerciseRules = a.rules;
+      else if (a.type === "addRecurringSessions") {
+        const ex = co.extraSessions || [];
+        co.extraSessions = [...ex, ...a.weekdays.filter((w) => !ex.some((e) => e.weekday === w)).map((w) => ({ weekday: w, type: a.sessionType, fromWeek: 1 }))].slice(0, 7);
+      }
+      else if (a.type === "setSchedule") u.schedule = { ...u.schedule, ...a.change };
+    }
+    if (!(res.actions || []).some((a) => a.type === "undoLast")) u.coachOverrides = co;
+    transcript.push({ msg, intent: res.intent, reply: res.reply, pending: res.pending, actions: (res.actions || []).map((a) => a.type) });
+  }
+  return { user: u, transcript };
+}
+
+const SESSION_A = [
+  "ran 40 min easy this morning", "add 2 upper body sessions on tuesdays and thursdays",
+  "add an easy run on mondays too", "do it anyway", "my knee hurts", "undo that",
+  "ive got a cold", "feeling better now", "im on holiday for two weeks", "undo that",
+  "i have a parkrun on saturday", "i dont have a pull-up bar", "legs are wrecked",
+  "am i getting fitter", "whats a deload week",
+];
+const convA = conversation(SESSION_A);
+check("A 15-turn conversation never falls back to 'I didn't follow'",
+  convA.transcript.every((x) => x.intent !== "unknown"),
+  convA.transcript.filter((x) => x.intent === "unknown").map((x) => x.msg).join(" | "));
+check("State stays coherent through the whole conversation", (() => {
+  const p = buildPlan(convA.user, computeAdaptation(convA.user));
+  return p.weeks.flatMap((w) => w.days).every((d) => d.isRest ? !d.session : (d.session && d.session.label && d.session.minutes > 0));
+})());
+check("Undo history stays bounded", convA.user.coachHistory.length <= 10, String(convA.user.coachHistory.length));
+check("Overrides don't accumulate junk keys",
+  Object.keys(convA.user.coachOverrides).every((k) =>
+    ["blockedDates", "moves", "swaps", "loadFactor", "loadFactorFromWeek", "loadReason", "softenUntil",
+     "softenReason", "illness", "races", "effortOnly", "exerciseRules", "extraSessions"].includes(k)),
+  Object.keys(convA.user.coachOverrides).join(","));
+check("Insisting after a refusal actually adds the session",
+  convA.transcript[3].actions.includes("addRecurringSessions"),
+  JSON.stringify(convA.transcript[3]));
+
+section("Undo depth and honesty");
+const convU = conversation(["legs are wrecked", "undo that", "undo that", "undo that"]);
+check("Undoing past the history says so rather than claiming success",
+  /nothing left to undo/i.test(convU.transcript[2].reply), convU.transcript[2].reply.slice(0, 70));
+check("…and takes no action", convU.transcript[2].actions.length === 0);
+check("The volume override really is gone after undo",
+  convU.user.coachOverrides.loadFactor === undefined,
+  JSON.stringify(convU.user.coachOverrides));
+
+section("The coach never claims an action it didn't take");
+const convH = conversation(["delete yesterday's log", "monday not tuesday"]);
+check("Deleting a log that doesn't exist says so",
+  /nothing logged/i.test(convH.transcript[0].reply), convH.transcript[0].reply.slice(0, 60));
+check("…and takes no action", convH.transcript[0].actions.length === 0);
+check("Moving a log that doesn't exist says so",
+  /can't find a logged session/i.test(convH.transcript[1].reply), convH.transcript[1].reply.slice(0, 60));
+
+const convF = conversation(["legs are wrecked", "legs are wrecked", "legs are wrecked", "legs are wrecked"]);
+const atFloor = convF.transcript[convF.transcript.length - 1];
+check("Hitting the volume floor is stated, not silently reported as a change",
+  /already at/i.test(atFloor.reply), atFloor.reply.slice(0, 70));
+check("…and no pointless write is made", atFloor.actions.length === 0);
+check("The floor is respected", convF.user.coachOverrides.loadFactor >= 0.7);
+
+section("Repeating yourself is safe");
+const convR = conversation(["add an upper body session on fridays", "add an upper body session on fridays"]);
+check("Asking twice doesn't create two sessions",
+  (convR.user.coachOverrides.extraSessions || []).filter((e) => e.weekday === 4).length === 1,
+  JSON.stringify(convR.user.coachOverrides.extraSessions));
+check("…and the second reply says it was already there",
+  /already had one/i.test(convR.transcript[1].reply), convR.transcript[1].reply.slice(0, 80));
+
+section("Answers must not depend on which weekday it is");
+for (const label of ["what am I doing today?", "what's the point of this session", "am I getting fitter"]) {
+  const uu = mkUser(); uu.planStart = dateKey(monday);
+  const pl = buildPlan(uu, computeAdaptation(uu)); const aa = computeAdaptation(uu);
+  const intents = pl.weeks[0].days.map((d) => coachRespond(label, { user: uu, plan: pl, adaptation: aa, today: d.date }).intent);
+  check(`"${label}" is understood on all seven weekdays`,
+    intents.every((i) => i !== "unknown"), intents.join(","));
+}
 
 section("Sample week output");
 u = mkUser(); a = computeAdaptation(u); plan = buildPlan(u, a);

@@ -310,7 +310,7 @@ python3 -m http.server 8000
 ```
 
 Open `http://localhost:8000/index.html?demo=1`. Open `/test.html` to run the engine suite
-(356 checks: VDOT math, plan structure, scheduling, volume ramp, intensity, every adaptation
+(375 checks: VDOT math, plan structure, scheduling, volume ramp, intensity, every adaptation
 rule, derived fitness, schedule history, feasibility, and coverage of every requirement).
 
 It must be served over HTTP — `file://` breaks ES module imports.
@@ -418,6 +418,11 @@ only the version published in the console is enforced.
 health-app data, no analytics, no third-party scripts. Free-text input is limited to a 60-char
 name and 40-char commitment labels, both length-capped client-side and validated in the rules.
 
+**The coach never claims an action it didn't take.** Undoing with nothing left to undo,
+deleting a log that isn't there, moving a log that doesn't exist, and cutting volume that's
+already at the floor all used to report success. Each now checks first and says plainly that
+it did nothing — a false confirmation is a lie the athlete has no way to detect.
+
 **Robustness.** `stress.html` builds plans from deliberately malformed documents — null
 collections, wrong types, an illness with no end date, `NaN` load factors — because Firestore
 can hand back a partial or stale document and the app must not blank out. It also covers
@@ -469,6 +474,7 @@ sessions, and test results. It asks twice and cannot be undone.
 | `probe.html` / `probe-gaps.html` | Measured coach coverage, 72 phrasings |
 | `probe-messy.html` | Typos, txt-speak and rambling input, 26 cases |
 | `audit.html` | Interaction audit — overlapping overrides on one week |
+| — | Multi-turn conversations are covered inside `test.html`, replaying whole sessions and checking state after every turn |
 | `stress.html` | Malformed state, numeric extremes, boundaries, performance, hostile input |
 
 ## Editing the training content
@@ -480,5 +486,5 @@ targets) lives in `plan-engine.js`.
 ## Cache-busting
 
 `index.html`, `app.js`, `plan-engine.js`, and `coach.js` carry `?v=` on their imports —
-currently `v=38`.
+currently `v=39`.
 Bump them on every deploy that touches CSS or JS, or phones will serve stale copies for days.
