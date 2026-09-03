@@ -1,0 +1,252 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>100-persona simulation</title>
+<style>body{font-family:ui-monospace,Menlo,monospace;background:#0A0A0A;color:#eee;padding:20px;font-size:12.5px;line-height:1.6}
+h2{color:#D8FF00;margin:18px 0 6px}.bad{color:#FF4D4D}.ok{color:#D8FF00}.dim{color:#888}
+td{padding:3px 12px 3px 0;vertical-align:top;border-bottom:1px solid #222}</style></head><body>
+<div id="out">starting…</div>
+<script>window.addEventListener("error",e=>{document.getElementById("out").innerHTML=`<div class="bad">CRASH: ${e.message}</div>`});</script>
+<script type="module">
+import { buildPlan, computeAdaptation, deriveFitness, pruneCoachOverrides, goalAssessment,
+         feasibilityReport, vdotFromRace, dateKey, addDays, mondayOnOrBefore } from "./plan-engine.js?v=39";
+import { coachRespond } from "./coach.js?v=39";
+
+// Deterministic PRNG so any failure is reproducible from its persona id.
+function rng(seed){let s=seed>>>0;return()=>{s=(s*1664525+1013904223)>>>0;return s/4294967296;};}
+
+const EVENTS=["fiveK","tenK","half","marathon"];
+const FIT=["allround","strength","endurance"];
+const WFREQ=["none","low","mid","high"], CFREQ=["none","low","mid","high"];
+const RUNDUR=["under10","to20","to30","to45","to60","over60"];
+const INJ=["hamstring","groin","ankle","knee","calf","hipFlexor","lowerBack","shoulder"];
+
+// Behaviour archetypes drive what the persona says and does day to day.
+const ARCH=[
+ {n:"consistent",adh:.95,chat:.10,ill:.002,inj:.002,trav:.002,race:.01,tinker:.02},
+ {n:"erratic",adh:.45,chat:.25,ill:.01,inj:.005,trav:.01,race:.005,tinker:.05},
+ {n:"injury-prone",adh:.7,chat:.30,ill:.008,inj:.03,trav:.004,race:.005,tinker:.03},
+ {n:"over-eager",adh:.98,chat:.35,ill:.004,inj:.015,trav:.002,race:.02,tinker:.15},
+ {n:"traveller",adh:.6,chat:.20,ill:.01,inj:.004,trav:.04,race:.005,tinker:.03},
+ {n:"tinkerer",adh:.8,chat:.55,ill:.005,inj:.006,trav:.005,race:.01,tinker:.35},
+ {n:"silent",adh:.75,chat:.01,ill:.005,inj:.005,trav:.005,race:.002,tinker:0},
+ {n:"messy-typer",adh:.7,chat:.45,ill:.01,inj:.01,trav:.01,race:.01,tinker:.15},
+ {n:"comeback",adh:.55,chat:.25,ill:.02,inj:.02,trav:.02,race:.005,tinker:.05},
+ {n:"racer",adh:.9,chat:.25,ill:.004,inj:.008,trav:.005,race:.05,tinker:.08},
+];
+
+const MSG={
+ log:["ran 40 min easy this morning","did the session, felt fine","ran 8k today","completed today's session","did my long run, felt good","gym session done, 45 min","ran 30 mins easy","nailed it today"],
+ logMessy:["ran 40 mins easy this mornin","did my long run yestrday, felt gd","did 8k this mornin","finshed todays workout","ran 30 min esay"],
+ miss:["missed today, no time","didnt manage today","skipped it, work was mental","couldnt train today"],
+ ill:["ive got a cold","I'm sick, fever since yesterday","feeling rough, sore throat"],
+ better:["feeling better now","back to normal, all clear"],
+ injury:["my knee hurts","achilles is sore","my hamstring is tight","kne hurts a bit"],
+ travel:["im on holiday for two weeks","away for a week","travelling tuesday to thursday"],
+ back:["just got back after 2 weeks off","back after a week off"],
+ race:["i have a parkrun on saturday","i signed up for a 10k in 3 weeks","ran a 5k pb today, 23:40"],
+ tinker:["add an upper body session on tuesdays","add 2 strength sessions on mondays and fridays","remove the tuesday session","move my long run to sunday","swap tuesday and thursday","i want to train 5 times a week","make my sessions 45 minutes","replace pull-ups with dips","i dont have a pull-up bar","remove burpees","i want more core work","legs are wrecked","that felt way too easy","reduce the volume by 20%","undo that","do it anyway","am i getting fitter","whats a deload week","why is my easy pace so slow","what am i doing today","cant train thursday, work dinner","shorten my long run","my race got cancelled","i only slept 4 hours","im really stressed","big night out yesterday","i only have a treadmill","its 35 degrees out","delete yesterdays log","no please add those sessions"],
+};
+
+function makePersona(i){
+ const r=rng(i*7919+13);
+ const arch=ARCH[i%ARCH.length];
+ const endurance=i%3!==2;
+ const startedDaysAgo=[0,7,21,45,80,120][i%6];
+ const weeks=[3,6,10,16,24,40,52][i%7];
+ const commits={};
+ const nc=Math.floor(r()*4);
+ for(let k=0;k<nc;k++){const d=Math.floor(r()*7);commits[d]={load:r()<.6?"hard":"light",label:"Commit"+d};}
+ const planStart=mondayOnOrBefore(addDays(new Date(),-startedDaysAgo));
+ return {
+  id:i, arch, seed:i*7919+13, startedDaysAgo,
+  user:{
+   name:"P"+i, planStart:dateKey(planStart),
+   profile:{workoutsPerWeek:WFREQ[Math.floor(r()*4)],cardioPerWeek:CFREQ[Math.floor(r()*4)],
+     runDuration:RUNDUR[Math.floor(r()*6)], fiveKSeconds: r()<.5?null:Math.round(1000+r()*1800),
+     injuryFocus: r()<.4?[INJ[Math.floor(r()*8)]]:[]},
+   schedule:{sessionsPerWeek:2+Math.floor(r()*5),minutesPerSession:[30,45,60,75,90][Math.floor(r()*5)],commitments:commits},
+   goal: endurance
+     ?{type:"endurance",event:EVENTS[Math.floor(r()*4)],targetSeconds:r()<.5?null:Math.round(1100+r()*7000),deadline:dateKey(addDays(planStart,weeks*7))}
+     :{type:"fitness",event:"fiveK",fitnessTarget:FIT[Math.floor(r()*3)],targetSeconds:null,deadline:dateKey(addDays(planStart,weeks*7))},
+   logs:{},tests:{},coachOverrides:{},coachHistory:[],chat:[],changeLog:[],
+   scheduleHistory:[{fromWeek:1,sessionsPerWeek:0}],
+  }};
+}
+
+// Mirrors the app's action application, minus persistence.
+function apply(u,actions,currentWeek,monday){
+ const co={...u.coachOverrides};let snapped=false;
+ for(const a of actions){
+  if(!snapped&&a.type!=="undoLast"){u.coachHistory=[...u.coachHistory,{snap:{coachOverrides:JSON.parse(JSON.stringify(u.coachOverrides))}}].slice(-10);snapped=true;}
+  switch(a.type){
+   case"undoLast":{const h=[...u.coachHistory];const last=h.pop();if(last){u.coachOverrides=last.snap.coachOverrides;u.coachHistory=h;}return;}
+   case"logActual":u.logs[a.dateKey]={done:true,rpe:a.session.rpe,targetRpe:a.session.plannedRpe??a.session.rpe,type:a.session.type,minutes:a.session.minutes};break;
+   case"deleteLog":delete u.logs[a.dateKey];break;
+   case"moveLog":{const e=u.logs[a.from];if(e){u.logs[a.to]=e;delete u.logs[a.from];}break;}
+   case"recordResult":u.tests[currentWeek]={type:"run",seconds:a.seconds,meters:a.meters};break;
+   case"blockDates":co.blockedDates=[...new Set([...(co.blockedDates||[]),...a.dates])];break;
+   case"unblockDates":co.blockedDates=(co.blockedDates||[]).filter(d=>!a.dates.includes(d));break;
+   case"moveSession":co.moves={...(co.moves||{}),[a.from]:a.to};break;
+   case"swapDays":co.swaps=[...(co.swaps||[]),[a.a,a.b]].slice(-20);break;
+   case"setLoad":co.loadFactor=a.factor;co.loadFactorFromWeek=currentWeek;break;
+   case"softenDays":co.softenUntil=dateKey(addDays(new Date(),a.days));break;
+   case"setIllness":co.illness={level:a.level,until:a.until};break;
+   case"clearIllness":delete co.illness;break;
+   case"addRace":co.races=[...(co.races||[]).filter(r=>r.dateKey!==a.dateKey),{dateKey:a.dateKey,meters:a.meters,label:a.label}].slice(-10);break;
+   case"removeRace":co.races=(co.races||[]).filter(r=>r.dateKey!==a.dateKey);break;
+   case"setEffortOnly":co.effortOnly={until:a.until,reason:a.reason};break;
+   case"setExerciseRules":co.exerciseRules=a.rules;break;
+   case"addInjuryFocus":u.profile={...u.profile,injuryFocus:[...new Set([...(u.profile.injuryFocus||[]),a.part])].slice(0,8)};break;
+   case"addRecurringSessions":{const ex=co.extraSessions||[];co.extraSessions=[...ex,...a.weekdays.filter(w=>!ex.some(e=>e.weekday===w)).map(w=>({weekday:w,type:a.sessionType,fromWeek:currentWeek}))].slice(0,7);break;}
+   case"removeRecurringSessions":co.extraSessions=(co.extraSessions||[]).filter(e=>!a.weekdays.includes(e.weekday));break;
+   case"setSchedule":u.schedule={...u.schedule,...a.change};u.scheduleHistory=[...u.scheduleHistory,{fromWeek:currentWeek,sessionsPerWeek:u.schedule.sessionsPerWeek}].slice(-100);break;
+  }
+ }
+ u.coachOverrides=co;
+}
+
+const CAPS={logs:500,tests:60,chat:120,coachHistory:10,changeLog:200,scheduleHistory:100};
+const OCAPS={extraSessions:7,blockedDates:200,races:10,swaps:20};
+const num=(x)=>typeof x==="number"&&isFinite(x);
+
+function checkDay(p,day,errs){
+ const u=p.user;
+ let adapt,plan;
+ try{adapt=computeAdaptation(u);}catch(e){errs.push({k:"computeAdaptation threw",d:e.message,day});return null;}
+ try{plan=buildPlan(u,adapt);}catch(e){errs.push({k:"buildPlan threw",d:e.message,day});return null;}
+
+ if(!num(adapt.volumeFactor))errs.push({k:"volumeFactor not finite",d:String(adapt.volumeFactor),day});
+ if(adapt.adherence!=null&&(!num(adapt.adherence)||adapt.adherence<0||adapt.adherence>1))
+   errs.push({k:"adherence out of range",d:String(adapt.adherence),day});
+ const f=adapt.fitness;
+ if(!f||!num(f.vdot)||f.vdot<20||f.vdot>75)errs.push({k:"fitness vdot out of range",d:String(f&&f.vdot),day});
+
+ if(plan.paces)for(const [k2,v]of Object.entries(plan.paces))
+   if(!num(v)||v<=0||v>3000)errs.push({k:"pace out of range",d:`${k2}=${v}`,day});
+
+ if(plan.weeks.length!==plan.totalWeeks)errs.push({k:"week count mismatch",d:`${plan.weeks.length}/${plan.totalWeeks}`,day});
+ for(const w of plan.weeks){
+  if(w.days.length!==7){errs.push({k:"week not 7 days",d:`w${w.num}=${w.days.length}`,day});continue;}
+  if(!num(w.sessionMinutes)||w.sessionMinutes<=0)errs.push({k:"sessionMinutes invalid",d:`w${w.num}=${w.sessionMinutes}`,day});
+  if(w.sessionMinutes>u.schedule.minutesPerSession)
+    errs.push({k:"session exceeds stated cap",d:`w${w.num} ${w.sessionMinutes}>${u.schedule.minutesPerSession}`,day});
+  for(const d of w.days){
+   if(d.isRest&&d.session)errs.push({k:"day is rest AND has session",d:d.dateKey,day});
+   if(!d.isRest){
+    if(!d.session){errs.push({k:"non-rest day has no session",d:d.dateKey,day});continue;}
+    if(!d.session.label)errs.push({k:"session missing label",d:d.dateKey,day});
+    if(!num(d.session.minutes)||d.session.minutes<=0)errs.push({k:"session minutes invalid",d:`${d.dateKey}=${d.session.minutes}`,day});
+    if(!num(d.session.targetRpe)||d.session.targetRpe<1||d.session.targetRpe>10)errs.push({k:"targetRpe out of range",d:`${d.dateKey}=${d.session.targetRpe}`,day});
+    if(!Array.isArray(d.session.gear))errs.push({k:"gear not an array",d:d.dateKey,day});
+    if(!Array.isArray(d.session.lines)||!d.session.lines.length)errs.push({k:"session has no content lines",d:d.dateKey,day});
+    if(d.session.lines&&d.session.lines.some(l=>typeof l!=="string"||/undefined|NaN|\[object/.test(l)))
+      errs.push({k:"session line contains undefined/NaN",d:`${d.dateKey}: ${(d.session.lines.find(l=>/undefined|NaN|\[object/.test(l))||"").slice(0,60)}`,day});
+   }
+   if(d.extraSession&&!d.session)errs.push({k:"extraSession without a main session",d:d.dateKey,day});
+  }
+ }
+ for(const [k2,cap]of Object.entries(CAPS)){
+  const n=Array.isArray(u[k2])?u[k2].length:Object.keys(u[k2]||{}).length;
+  if(n>cap)errs.push({k:`${k2} exceeds rules cap`,d:`${n}>${cap}`,day});
+ }
+ for(const [k2,cap]of Object.entries(OCAPS)){
+  const v=u.coachOverrides[k2];const n=Array.isArray(v)?v.length:0;
+  if(n>cap)errs.push({k:`coachOverrides.${k2} exceeds rules cap`,d:`${n}>${cap}`,day});
+ }
+ const ex=u.coachOverrides.extraSessions||[];
+ if(new Set(ex.map(e=>e.weekday)).size!==ex.length)errs.push({k:"duplicate extraSessions weekday",d:JSON.stringify(ex),day});
+ return {plan,adapt};
+}
+
+function simulate(p){
+ const errs=[];const r=rng(p.seed);const u=p.user;
+ u.scheduleHistory=[{fromWeek:1,sessionsPerWeek:u.schedule.sessionsPerWeek}];
+ const start=mondayOnOrBefore(new Date(p.user.planStart.split("-").map(Number)[0],p.user.planStart.split("-").map(Number)[1]-1,p.user.planStart.split("-").map(Number)[2]));
+ let ctx=checkDay(p,0,errs); if(!ctx)return errs;
+
+ for(let day=1;day<=100;day++){
+  const date=addDays(start,day);const key=dateKey(date);
+  const found=ctx.plan.weeks.flatMap(w=>w.days).find(d=>d.dateKey===key);
+  const week=ctx.adapt.currentWeek;
+
+  // Train, or don't.
+  if(found&&!found.isRest&&r()<p.arch.adh)
+    u.logs[key]={done:true,rpe:Math.max(1,Math.min(10,Math.round(found.session.targetRpe+(r()*4-2)))),targetRpe:found.session.targetRpe,type:found.session.type,minutes:found.session.minutes};
+
+  // Test weeks: record a result.
+  const wk=ctx.plan.weeks.find(w=>w.days.some(d=>d.dateKey===key));
+  if(wk&&wk.isTest&&r()<.35&&!u.tests[wk.num])
+    u.tests[wk.num]={type:"run",seconds:Math.round(1100+r()*2200),meters:5000};
+
+  // Say something.
+  const msgs=[];
+  const pick=(arr)=>arr[Math.floor(r()*arr.length)];
+  if(r()<p.arch.ill)msgs.push(pick(MSG.ill));
+  if(r()<p.arch.ill*.8)msgs.push(pick(MSG.better));
+  if(r()<p.arch.inj)msgs.push(pick(MSG.injury));
+  if(r()<p.arch.trav)msgs.push(pick(r()<.5?MSG.travel:MSG.back));
+  if(r()<p.arch.race)msgs.push(pick(MSG.race));
+  if(r()<p.arch.tinker)msgs.push(pick(MSG.tinker));
+  if(r()<p.arch.chat)msgs.push(pick(p.arch.n==="messy-typer"?MSG.logMessy:(r()<.6?MSG.log:MSG.miss)));
+
+  let pending=null;
+  for(const m of msgs){
+   let res;
+   try{res=coachRespond(m,{user:u,plan:ctx.plan,adaptation:ctx.adapt,today:new Date(),pending});}
+   catch(e){errs.push({k:"coachRespond threw",d:`"${m}" → ${e.message}`,day});continue;}
+   if(!res||typeof res.reply!=="string"||!res.reply.trim())errs.push({k:"coach returned an empty reply",d:`"${m}"`,day});
+   else if(/undefined|NaN|\[object/.test(res.reply))errs.push({k:"coach reply contains undefined/NaN",d:`"${m}" → ${res.reply.slice(0,90)}`,day});
+   if(!Array.isArray(res.actions))errs.push({k:"coach actions not an array",d:`"${m}"`,day});
+   else{try{apply(u,res.actions,week,start);}catch(e){errs.push({k:"applying coach actions threw",d:`"${m}" → ${e.message}`,day});}}
+   u.chat=[...u.chat,{role:"user",text:m},{role:"coach",text:res.reply}].slice(-120);
+   pending=res.pending||null;
+  }
+
+  const next=checkDay(p,day,errs);
+  if(!next)return errs;
+  ctx=next;
+  if(errs.length>40)break;
+ }
+ // Final sweep on the accumulated state.
+ try{ if(pruneCoachOverrides(u.coachOverrides)===undefined) errs.push({k:"pruneCoachOverrides returned undefined",d:"",day:100}); }
+ catch(e){errs.push({k:"pruneCoachOverrides threw",d:e.message,day:100});}
+ try{ const a2=computeAdaptation(u); const p2=buildPlan(u,a2); goalAssessment(u,p2,a2); feasibilityReport(u); }
+ catch(e){errs.push({k:"final assessment threw",d:e.message,day:100});}
+ return errs;
+}
+
+const personas=Array.from({length:100},(_,i)=>makePersona(i));
+const all=[];let idx=0;
+function step(){
+ const t0=performance.now();
+ while(idx<personas.length&&performance.now()-t0<3000){
+  const p=personas[idx];
+  const errs=simulate(p);
+  errs.forEach(e=>all.push({...e,persona:p.id,arch:p.arch.n,goal:p.user.goal.type+"/"+(p.user.goal.event||p.user.goal.fitnessTarget),
+    sched:`${p.user.schedule.sessionsPerWeek}x${p.user.schedule.minutesPerSession}`,started:p.startedDaysAgo}));
+  idx++;
+ }
+ document.getElementById("out").innerHTML=`<h2>simulating… ${idx}/100 personas, ${all.length} errors</h2>`;
+ if(idx<personas.length)setTimeout(step,0);else report();
+}
+function report(){
+ const groups={};
+ for(const e of all){(groups[e.k]=groups[e.k]||[]).push(e);}
+ const keys=Object.keys(groups).sort((a,b)=>groups[b].length-groups[a].length);
+ let html=`<h2>${all.length} errors across 100 personas × 100 days · ${keys.length} distinct kinds</h2>`;
+ if(!keys.length)html+=`<div class="ok">No invariant violations.</div>`;
+ for(const k of keys){
+  const g=groups[k];
+  const archs=[...new Set(g.map(x=>x.arch))];
+  const goals=[...new Set(g.map(x=>x.goal))];
+  html+=`<h2 class="bad">${k} — ${g.length} occurrences</h2>`;
+  html+=`<div class="dim">personas: ${[...new Set(g.map(x=>x.persona))].slice(0,14).join(", ")}${new Set(g.map(x=>x.persona)).size>14?"…":""}<br>`;
+  html+=`archetypes: ${archs.join(", ")}<br>goals: ${goals.slice(0,6).join(", ")}<br>`;
+  html+=`schedules: ${[...new Set(g.map(x=>x.sched))].slice(0,8).join(", ")}<br>`;
+  html+=`days: ${Math.min(...g.map(x=>x.day))}–${Math.max(...g.map(x=>x.day))}</div>`;
+  html+=`<table>`+g.slice(0,5).map(x=>`<tr><td>P${x.persona}</td><td>d${x.day}</td><td>${String(x.d).replace(/</g,"&lt;").slice(0,150)}</td></tr>`).join("")+`</table>`;
+ }
+ window.__simDone=true;window.__simGroups=Object.fromEntries(keys.map(k=>[k,groups[k].length]));
+ window.__simDetail=keys.map(k=>({kind:k,count:groups[k].length,archs:[...new Set(groups[k].map(x=>x.arch))],goals:[...new Set(groups[k].map(x=>x.goal))].slice(0,6),scheds:[...new Set(groups[k].map(x=>x.sched))].slice(0,6),personas:[...new Set(groups[k].map(x=>x.persona))].slice(0,10),dayMin:Math.min(...groups[k].map(x=>x.day)),dayMax:Math.max(...groups[k].map(x=>x.day)),samples:groups[k].slice(0,4).map(x=>`P${x.persona} d${x.day}: ${String(x.d).slice(0,120)}`)}));
+ document.getElementById("out").innerHTML=html;
+}
+setTimeout(step,0);
+</script></body></html>
