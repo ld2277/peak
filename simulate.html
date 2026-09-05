@@ -6,8 +6,8 @@ td{padding:3px 12px 3px 0;vertical-align:top;border-bottom:1px solid #222}</styl
 <script>window.addEventListener("error",e=>{document.getElementById("out").innerHTML=`<div class="bad">CRASH: ${e.message}</div>`});</script>
 <script type="module">
 import { buildPlan, computeAdaptation, deriveFitness, pruneCoachOverrides, goalAssessment,
-         feasibilityReport, vdotFromRace, dateKey, addDays, mondayOnOrBefore } from "./plan-engine.js?v=39";
-import { coachRespond } from "./coach.js?v=39";
+         feasibilityReport, vdotFromRace, dateKey, addDays, mondayOnOrBefore } from "./plan-engine.js?v=40";
+import { coachRespond } from "./coach.js?v=40";
 
 // Deterministic PRNG so any failure is reproducible from its persona id.
 function rng(seed){let s=seed>>>0;return()=>{s=(s*1664525+1013904223)>>>0;return s/4294967296;};}
@@ -153,6 +153,46 @@ function checkDay(p,day,errs){
  }
  const ex=u.coachOverrides.extraSessions||[];
  if(new Set(ex.map(e=>e.weekday)).size!==ex.length)errs.push({k:"duplicate extraSessions weekday",d:JSON.stringify(ex),day});
+
+ // --- second-pass invariants
+ for(const w of plan.weeks){
+  if(!num(w.longMinutes)||w.longMinutes<w.sessionMinutes)errs.push({k:"longMinutes invalid or below sessionMinutes",d:`w${w.num} ${w.longMinutes}<${w.sessionMinutes}`,day});
+  for(const d of w.days){
+   if(d.extraSession){
+    const x=d.extraSession;
+    if(!x.label||!num(x.minutes)||x.minutes<=0||!Array.isArray(x.lines)||!x.lines.length)
+      errs.push({k:"extraSession malformed",d:d.dateKey,day});
+   }
+  }
+ }
+ if(!Array.isArray(plan.warnings)||plan.warnings.some(w=>typeof w!=="string"||/undefined|NaN/.test(w)))
+   errs.push({k:"plan.warnings malformed",d:JSON.stringify(plan.warnings).slice(0,100),day});
+ if(!["measured","estimated"].includes(f.confidence))errs.push({k:"fitness confidence invalid",d:String(f.confidence),day});
+ if(!Array.isArray(f.timeline)||f.timeline.some(t=>!num(t.vdot)))errs.push({k:"fitness timeline has non-finite vdot",d:"",day});
+ if(!Array.isArray(adapt.notes)||adapt.notes.some(n=>typeof n.text!=="string"||/undefined|NaN/.test(n.text)))
+   errs.push({k:"adaptation note malformed",d:JSON.stringify(adapt.notes).slice(0,100),day});
+ try{
+  const ga=goalAssessment(u,plan,adapt);
+  if(ga){
+   if(!["ahead","onTrack","ambitious","unrealistic"].includes(ga.verdict))errs.push({k:"goalAssessment verdict invalid",d:String(ga.verdict),day});
+   for(const k2 of["currentPredicted","projectedSeconds","neededVdot","currentVdot"])if(!num(ga[k2])||ga[k2]<0)errs.push({k:"goalAssessment number invalid",d:`${k2}=${ga[k2]}`,day});
+   if(typeof ga.detail!=="string"||/undefined|NaN/.test(ga.detail))errs.push({k:"goalAssessment detail malformed",d:String(ga.detail).slice(0,80),day});
+  }
+ }catch(e){errs.push({k:"goalAssessment threw",d:e.message,day});}
+ try{
+  const fr=feasibilityReport(u);
+  if(!Array.isArray(fr))errs.push({k:"feasibilityReport not an array",d:"",day});
+  else for(const i of fr){if(!["blocker","warning","note"].includes(i.severity)||!i.title||!i.detail||/undefined|NaN/.test(i.title+i.detail+(i.fix||"")))errs.push({k:"feasibility issue malformed",d:JSON.stringify(i).slice(0,100),day});}
+ }catch(e){errs.push({k:"feasibilityReport threw",d:e.message,day});}
+ // A race placed on a Monday has its "day before" in the previous week — that
+ // day is not in the same byKey map, so the taper may silently not apply.
+ for(const r of(u.coachOverrides.races||[])){
+  const rd=plan.weeks.flatMap(w=>w.days).find(d=>d.dateKey===r.dateKey);
+  if(rd&&rd.weekdayIndex===0){
+   const prev=plan.weeks.flatMap(w=>w.days).find(d=>d.dateKey===dateKey(addDays(rd.date,-1)));
+   if(prev&&prev.session&&!prev.session.isRace)errs.push({k:"race on Monday: previous Sunday not protected",d:r.dateKey,day});
+  }
+ }
  return {plan,adapt};
 }
 
@@ -193,7 +233,13 @@ function simulate(p){
    try{res=coachRespond(m,{user:u,plan:ctx.plan,adaptation:ctx.adapt,today:new Date(),pending});}
    catch(e){errs.push({k:"coachRespond threw",d:`"${m}" → ${e.message}`,day});continue;}
    if(!res||typeof res.reply!=="string"||!res.reply.trim())errs.push({k:"coach returned an empty reply",d:`"${m}"`,day});
-   else if(/undefined|NaN|\[object/.test(res.reply))errs.push({k:"coach reply contains undefined/NaN",d:`"${m}" → ${res.reply.slice(0,90)}`,day});
+   else{
+    if(/undefined|NaN|\[object|\bnull\b/.test(res.reply))errs.push({k:"coach reply contains undefined/NaN/null",d:`"${m}" → ${res.reply.slice(0,90)}`,day});
+    { const flat=res.reply.replace(/\n+/g," "); // \n\n is a paragraph break, not a double space
+      const hit=flat.match(/.{0,30}(?:  |\s[.,!?]|\ba [aeiou]).{0,30}/);
+      if(hit)errs.push({k:"coach reply has a grammar artefact",d:`"${m}" → ${hit[0]}`,day}); }
+    (window.__census[m]=window.__census[m]||{})[res.intent]=((window.__census[m]||{})[res.intent]||0)+1;
+   }
    if(!Array.isArray(res.actions))errs.push({k:"coach actions not an array",d:`"${m}"`,day});
    else{try{apply(u,res.actions,week,start);}catch(e){errs.push({k:"applying coach actions threw",d:`"${m}" → ${e.message}`,day});}}
    u.chat=[...u.chat,{role:"user",text:m},{role:"coach",text:res.reply}].slice(-120);
@@ -203,7 +249,7 @@ function simulate(p){
   const next=checkDay(p,day,errs);
   if(!next)return errs;
   ctx=next;
-  if(errs.length>40)break;
+  // no cap: a persona with one noisy failure must not mask a second kind
  }
  // Final sweep on the accumulated state.
  try{ if(pruneCoachOverrides(u.coachOverrides)===undefined) errs.push({k:"pruneCoachOverrides returned undefined",d:"",day:100}); }
@@ -213,6 +259,7 @@ function simulate(p){
  return errs;
 }
 
+window.__census={};
 const personas=Array.from({length:100},(_,i)=>makePersona(i));
 const all=[];let idx=0;
 function step(){
