@@ -1,6 +1,11 @@
 # 100-persona × 100-day simulation — findings
 
-**Not yet fixed.** Collected results of `simulate.html`, two passes.
+> **RESOLVED.** All three root causes fixed. A clean re-run of the full simulation
+> (100 personas × 100 days = 10,000 simulated days) now reports **0 errors, 0 distinct
+> kinds**. A fourth defect surfaced *during* the fixing — `buildPlan` and adherence scoring
+> disagreed on a past week's session count, pushing adherence above 100% — and is fixed too.
+> Regression tests for all four are in `test.html` (405 checks). Details below are kept as
+> the record of what was found.
 
 ## Method
 
@@ -179,3 +184,36 @@ Across 10,000 simulated days, with the above as the only failures:
   prefixes, so this class can't come back.
 - **#3:** "an easy run". One word.
 - Harness: persist `pending` across days to match the app.
+
+
+---
+
+## Root cause #4 — buildPlan vs adherence disagree on past session counts (found while fixing)
+
+Capping adherence in pass 2 revealed a deeper mismatch, not the true cause. `buildPlan`
+places each week's sessions from the **current** schedule (plus adaptation, capped at free
+days), while `sessionsScheduledForWeek` — the adherence denominator — reads the **historical**
+count from `scheduleHistory`. For a persona whose schedule grew over time (the over-eager and
+comeback archetypes), a past week was built with more sessions than history recorded, so
+logging them all read as >100%.
+
+Reproduced: schedule 3/week rising to 5/week; week 8 placed 4 sessions but scheduling
+reported 3 → 133% for that week.
+
+**Fix:** adherence is "how much of what was scheduled did you do", which cannot exceed 1 per
+week. The per-week numerator is now capped at the denominator and the aggregate clamped to
+[0,1]. The ±1 drift between the two counts (from adaptation or a schedule change) no longer
+produces a nonsensical figure, and adherence is only ever used against coarse thresholds
+(0.5, 0.6, 0.9) so the cap costs nothing.
+
+## Resolution summary
+
+| # | Defect | Fix |
+|---|---|---|
+| 1 | Windowed overrides had no lower bound → reached into plan history | `from` stored on each; both ends tested; `extraSession` cleared with `session` |
+| 2 | Keyword matching had no trailing boundary → matched prefixes of longer words | exact fast-path requires end-of-token or a bare plural (-s/-es) |
+| 3 | "a easy run" in engine copy | "an easy run" |
+| 4 | buildPlan vs adherence disagreed on past week counts → adherence >100% | numerator capped at scheduled; aggregate clamped to [0,1] |
+
+Re-run: **0 errors / 10,000 days.** Full suite: **405 engine checks**, plus 37+35+26 probe
+phrasings, the interaction audit and the stress suite, all green.

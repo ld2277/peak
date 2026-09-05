@@ -6,8 +6,8 @@ td{padding:3px 12px 3px 0;vertical-align:top;border-bottom:1px solid #222}</styl
 <script>window.addEventListener("error",e=>{document.getElementById("out").innerHTML=`<div class="bad">CRASH: ${e.message}</div>`});</script>
 <script type="module">
 import { buildPlan, computeAdaptation, deriveFitness, pruneCoachOverrides, goalAssessment,
-         feasibilityReport, vdotFromRace, dateKey, addDays, mondayOnOrBefore } from "./plan-engine.js?v=40";
-import { coachRespond } from "./coach.js?v=40";
+         feasibilityReport, vdotFromRace, dateKey, addDays, mondayOnOrBefore } from "./plan-engine.js?v=42";
+import { coachRespond } from "./coach.js?v=42";
 
 // Deterministic PRNG so any failure is reproducible from its persona id.
 function rng(seed){let s=seed>>>0;return()=>{s=(s*1664525+1013904223)>>>0;return s/4294967296;};}
@@ -87,12 +87,12 @@ function apply(u,actions,currentWeek,monday){
    case"moveSession":co.moves={...(co.moves||{}),[a.from]:a.to};break;
    case"swapDays":co.swaps=[...(co.swaps||[]),[a.a,a.b]].slice(-20);break;
    case"setLoad":co.loadFactor=a.factor;co.loadFactorFromWeek=currentWeek;break;
-   case"softenDays":co.softenUntil=dateKey(addDays(new Date(),a.days));break;
-   case"setIllness":co.illness={level:a.level,until:a.until};break;
+   case"softenDays":co.softenUntil=dateKey(addDays(new Date(),a.days));co.softenFrom=dateKey(new Date());break;
+   case"setIllness":co.illness={level:a.level,until:a.until,from:dateKey(new Date())};break;
    case"clearIllness":delete co.illness;break;
    case"addRace":co.races=[...(co.races||[]).filter(r=>r.dateKey!==a.dateKey),{dateKey:a.dateKey,meters:a.meters,label:a.label}].slice(-10);break;
    case"removeRace":co.races=(co.races||[]).filter(r=>r.dateKey!==a.dateKey);break;
-   case"setEffortOnly":co.effortOnly={until:a.until,reason:a.reason};break;
+   case"setEffortOnly":co.effortOnly={until:a.until,reason:a.reason,from:dateKey(new Date())};break;
    case"setExerciseRules":co.exerciseRules=a.rules;break;
    case"addInjuryFocus":u.profile={...u.profile,injuryFocus:[...new Set([...(u.profile.injuryFocus||[]),a.part])].slice(0,8)};break;
    case"addRecurringSessions":{const ex=co.extraSessions||[];co.extraSessions=[...ex,...a.weekdays.filter(w=>!ex.some(e=>e.weekday===w)).map(w=>({weekday:w,type:a.sessionType,fromWeek:currentWeek}))].slice(0,7);break;}
@@ -201,6 +201,7 @@ function simulate(p){
  u.scheduleHistory=[{fromWeek:1,sessionsPerWeek:u.schedule.sessionsPerWeek}];
  const start=mondayOnOrBefore(new Date(p.user.planStart.split("-").map(Number)[0],p.user.planStart.split("-").map(Number)[1]-1,p.user.planStart.split("-").map(Number)[2]));
  let ctx=checkDay(p,0,errs); if(!ctx)return errs;
+ let pending=null; // persists across days, as the app's last coach message does
 
  for(let day=1;day<=100;day++){
   const date=addDays(start,day);const key=dateKey(date);
@@ -227,7 +228,6 @@ function simulate(p){
   if(r()<p.arch.tinker)msgs.push(pick(MSG.tinker));
   if(r()<p.arch.chat)msgs.push(pick(p.arch.n==="messy-typer"?MSG.logMessy:(r()<.6?MSG.log:MSG.miss)));
 
-  let pending=null;
   for(const m of msgs){
    let res;
    try{res=coachRespond(m,{user:u,plan:ctx.plan,adaptation:ctx.adapt,today:new Date(),pending});}

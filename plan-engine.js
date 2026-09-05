@@ -5,7 +5,7 @@
 import {
   WARMUPS, COOLDOWNS, strengthBlock, conditioningBlock, prehabBlock,
   MOBILITY_FLOW, INJURY_FOCUS_LABELS,
-} from "./workouts.js?v=39";
+} from "./workouts.js?v=42";
 
 export { INJURY_FOCUS_LABELS };
 
@@ -527,6 +527,13 @@ function buildSession({ type, minutes, tier, phase, weekNum, weekInPhase, paces,
 
 const RUN_TYPES = new Set(["easy", "strides", "intervals", "tempo", "long", "test"]);
 
+// Start of a windowed override. Overrides created before `from` existed have
+// none stored; treating them as starting this week stops them reaching into
+// the past, which is the whole point.
+function windowStart(fromKey) {
+  return fromKey ? parseDateKey(fromKey) : mondayOnOrBefore(new Date());
+}
+
 function applyCoachOverrides(dayEntries, user, makeSession, weekNum) {
   const co = user.coachOverrides || {};
   const byKey = Object.fromEntries(dayEntries.map((d) => [d.dateKey, d]));
@@ -596,10 +603,15 @@ function applyCoachOverrides(dayEntries, user, makeSession, weekNum) {
   //     the session but strips the intensity out of it.
   if (co.illness?.until) {
     const until = parseDateKey(co.illness.until);
+    // Lower bound. Without it an illness declared today reached back across
+    // every past week of the plan and deleted the training history from view.
+    // Stored overrides that predate `from` fall back to this week's Monday.
+    const from = windowStart(co.illness.from);
     for (const d of dayEntries) {
-      if (d.date > until || !d.session) continue;
+      if (d.date < from || d.date > until || !d.session) continue;
       if (co.illness.level === "systemic") {
         d.session = null;
+        d.extraSession = null; // never leave an added session orphaned
         d.isRest = true;
         d.illnessCleared = true;
       } else if (["intervals", "tempo", "test", "conditioning"].includes(d.session.type)) {
@@ -649,8 +661,9 @@ function applyCoachOverrides(dayEntries, user, makeSession, weekNum) {
   // 3d. Conditions where pace targets are meaningless — run to effort instead.
   if (co.effortOnly?.until) {
     const until = parseDateKey(co.effortOnly.until);
+    const from = windowStart(co.effortOnly.from);
     for (const d of dayEntries) {
-      if (d.date > until || !d.session) continue;
+      if (d.date < from || d.date > until || !d.session) continue;
       if (!RUN_TYPES.has(d.session.type)) continue;
       d.session.lines = d.session.lines.map((l) => l.replace(/\s*\(about [^)]*\)/g, ""));
       d.session.lines = [
@@ -665,8 +678,9 @@ function applyCoachOverrides(dayEntries, user, makeSession, weekNum) {
   //    the stimulus is preserved, only the loading through the legs changes.
   if (co.softenUntil) {
     const until = parseDateKey(co.softenUntil);
+    const from = windowStart(co.softenFrom);
     for (const d of dayEntries) {
-      if (!d.session || d.date > until) continue;
+      if (!d.session || d.date < from || d.date > until) continue;
       const s = d.session;
       if (s.type === "test" || s.type === "race") {
         // A test must never be swapped to another modality. A bike time trial
@@ -675,7 +689,7 @@ function applyCoachOverrides(dayEntries, user, makeSession, weekNum) {
         // every pace in the plan. Postponing is the only honest option.
         s.lines = [
           s.type === "race"
-            ? `⚕️ Coach note: you've told me something hurts. Racing on it is how a niggle becomes months off — and a race run injured gives a slow time that would then recalibrate every pace in your plan. Sit this one out, or treat it as a easy run and ignore the clock.`
+            ? `⚕️ Coach note: you've told me something hurts. Racing on it is how a niggle becomes months off — and a race run injured gives a slow time that would then recalibrate every pace in your plan. Sit this one out, or treat it as an easy run and ignore the clock.`
             : `⚕️ Coach note: don't time-trial on something that hurts. Postpone this test until it's settled — a result set while injured would recalibrate every pace in your plan off a number that isn't you, and cross-training can't substitute because it measures a different engine.`,
           ...s.lines,
         ];
@@ -997,11 +1011,12 @@ export function sessionsScheduledForWeek(user, weekNum) {
   const blocked = new Set(co.blockedDates || []);
   const illUntil = co.illness?.level === "systemic" && co.illness.until
     ? parseDateKey(co.illness.until) : null;
+  const illFrom = illUntil ? windowStart(co.illness.from) : null;
   const planStart = mondayOnOrBefore(parseDateKey(user.planStart));
   let unavailable = 0;
   for (let i = 0; i < 7; i++) {
     const d = addDays(planStart, (weekNum - 1) * 7 + i);
-    if (blocked.has(dateKey(d)) || (illUntil && d <= illUntil)) unavailable++;
+    if (blocked.has(dateKey(d)) || (illUntil && d >= illFrom && d <= illUntil)) unavailable++;
   }
   if (!unavailable) return total;
   return Math.max(0, total - Math.round((unavailable * total) / 7));
@@ -1111,12 +1126,18 @@ export function computeAdaptation(user) {
         }
       }
     }
-    completed += weekDone;
+    // buildPlan places sessions from the CURRENT schedule (and adaptation),
+    // while `scheduled` here comes from scheduleHistory — the two can differ by
+    // a session for a past week, so a fully-trained week could read above 100%.
+    // Adherence is "how much of what was scheduled did you do", which cannot
+    // exceed 1 per week, so cap the numerator at the denominator.
+    const capped = Math.min(weekDone, scheduled);
+    completed += capped;
     expected += scheduled;
-    weeklyAdherence.push(scheduled > 0 ? weekDone / scheduled : 0);
+    weeklyAdherence.push(scheduled > 0 ? capped / scheduled : 0);
   }
 
-  const adherence = expected > 0 ? completed / expected : 1;
+  const adherence = expected > 0 ? Math.min(1, completed / expected) : 1;
   const rpeDelta = rpeCount > 0 ? rpeSum / rpeCount - targetSum / rpeCount : 0;
 
   if (expected > 0) {

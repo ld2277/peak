@@ -6,8 +6,8 @@
 <script type="module">
 import { buildPlan, computeAdaptation, deriveFitness, feasibilityReport, goalAssessment,
          vdotFromRace, predictRaceSeconds, parseTimeToSeconds, pruneCoachOverrides,
-         sessionsScheduledForWeek, dateKey, addDays, mondayOnOrBefore } from "./plan-engine.js?v=39";
-import { coachRespond } from "./coach.js?v=39";
+         sessionsScheduledForWeek, dateKey, addDays, mondayOnOrBefore } from "./plan-engine.js?v=42";
+import { coachRespond } from "./coach.js?v=42";
 
 const monday = mondayOnOrBefore(new Date());
 const mk = (over={}) => ({ name:"T", planStart: dateKey(monday),

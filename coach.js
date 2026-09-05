@@ -12,7 +12,7 @@
 import {
   dateKey, parseDateKey, addDays, weekdayIndex, WEEKDAYS, WEEKDAYS_SHORT,
   formatDuration, formatPace, INJURY_FOCUS_LABELS, vdotFromRace,
-} from "./plan-engine.js?v=39";
+} from "./plan-engine.js?v=42";
 
 // ---------------------------------------------------------------- text utils
 
@@ -134,9 +134,27 @@ function has(t, ...words) {
   return words.some((w) => fuzzyHas(t, w));
 }
 
+// Exact match with a trailing word boundary. Keyword entries carry a leading
+// space but historically no trailing one, so " yes" also matched " yesterday",
+// " rough" matched " roughly", " flat" matched " flattened" — and each changed
+// the plan on an ordinary sentence. The boundary rule is: after the keyword,
+// the rest of the token must be empty or a bare plural (-s / -es). Plurals are
+// kept because the lists rely on them: pull-up/pull-ups, squat/squats, run/runs.
+function exactHas(t, w) {
+  if (!w) return false;
+  if (!/[a-z0-9]/.test(w[w.length - 1])) return t.includes(w); // already bounded
+  let i = t.indexOf(w);
+  while (i !== -1) {
+    const rest = t.slice(i + w.length).match(/^[a-z0-9]*/)[0];
+    if (rest === "" || rest === "s" || rest === "es") return true;
+    i = t.indexOf(w, i + 1);
+  }
+  return false;
+}
+
 function hasAny(t, list) {
   // Exact first — it's cheap and covers most messages.
-  if (list.some((w) => t.includes(w))) return true;
+  if (list.some((w) => exactHas(t, w))) return true;
   return list.some((w) => fuzzyHas(t, w));
 }
 
@@ -432,7 +450,7 @@ const DONE_WORDS = [" completed", " finished", " done", " did the", " done the",
   " ticked off", " all done", " session done", " workout done", " did today's", " did the session",
   " did the workout", " did it", " job done"];
 
-const MISS_WORDS = [" missed", " skipped", " skip", " didn't do", " did not do", " didn't train",
+const MISS_WORDS = [" missed", " skipped", " skipping", " skip", " didn't do", " did not do", " didn't train",
   " did not train", " couldn't train", " could not train", " no time", " bailed", " gave up",
   " didn't manage", " did not manage", " never got", " didn't get out", " nothing today"];
 

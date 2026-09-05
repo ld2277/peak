@@ -31,8 +31,8 @@ import {
   feasibilityReport, achievableVdotGain, EVENT_REQUIREMENTS,
   deriveFitness, sessionsScheduledForWeek, baselineVdot, parseDateKey,
   pruneCoachOverrides,
-} from "./plan-engine.js?v=39";
-import { coachRespond } from "./coach.js?v=39";
+} from "./plan-engine.js?v=42";
+import { coachRespond } from "./coach.js?v=42";
 
 const out = document.getElementById("out");
 let pass = 0, fail = 0;
@@ -1000,10 +1000,16 @@ check("Fitness still decays across time off — detraining is real",
   deriveFitness(away).vdot < deriveFitness(userWith({}, 0)).vdot,
   `${deriveFitness(away).vdot.toFixed(2)} vs fresh`);
 
-// Systemic illness clears a week the same way.
-const illWeek = userWith({ illness: { level: "systemic", until: dateKey(addDays(monday, -1)) } }, 1);
-check("An illness week isn't scored as missed sessions either",
-  sessionsScheduledForWeek(illWeek, 1) < 4, String(sessionsScheduledForWeek(illWeek, 1)));
+// Systemic illness clears the days it actually spans (from..until), so those
+// days aren't counted as missed sessions. The window is bounded at both ends
+// now, so it must carry a `from` covering the week for this to apply.
+const illWeek = userWith({ illness: { level: "systemic", from: dateKey(addDays(monday, -7)), until: dateKey(addDays(monday, -1)) } }, 1);
+check("An active illness week isn't scored as missed sessions",
+  sessionsScheduledForWeek(illWeek, 1) < illWeek.schedule.sessionsPerWeek,
+  `${sessionsScheduledForWeek(illWeek, 1)} of ${illWeek.schedule.sessionsPerWeek}`);
+check("An illness that has ENDED no longer zeroes a week (bounded window)",
+  sessionsScheduledForWeek(userWith({ illness: { level: "systemic", from: dateKey(addDays(monday, -21)), until: dateKey(addDays(monday, -15)) } }, 1), 1)
+    === userWith({}, 1).schedule.sessionsPerWeek);
 
 section("Nothing stacks onto a race or an illness");
 const raceKey2 = dateKey(addDays(monday, 3));
@@ -1373,6 +1379,119 @@ for (const label of ["what am I doing today?", "what's the point of this session
   check(`"${label}" is understood on all seven weekdays`,
     intents.every((i) => i !== "unknown"), intents.join(","));
 }
+
+section("Root cause #2 — keywords must not match as prefixes of longer words");
+// Found by the 100-persona census: " yes" matched " yesterday", so after any
+// refusal an athlete reporting what they did yesterday had the refused action
+// silently carried out. Same class: rough/roughly, flat/flattened,
+// strain/straining, tight/tightened. All on ordinary, correctly-spelled text.
+const pendMove = { kind: "move", from: dateKey(addDays(monday, 1)), to: dateKey(addDays(monday, 6)), weekday: 6, label: "long run" };
+const withPend = (m) => coachRespond(m, { ...coachCtx(), pending: pendMove });
+check("'I ran 40 min yesterday' after a refusal is a log, not an affirmation",
+  withPend("I ran 40 min yesterday").intent === "logActual", withPend("I ran 40 min yesterday").intent);
+check("It executes no pending action", !withPend("I ran 40 min yesterday").actions.some((a) => a.type === "moveSession"));
+check("'yesterday was a rest day' after a refusal does not resume it",
+  withPend("yesterday was a rest day for me").intent !== "move", withPend("yesterday was a rest day for me").intent);
+check("'did my long run yestrday, felt gd' is still a log", withPend("did my long run yestrday, felt gd").intent !== "move");
+check("'it took roughly 40 minutes' does not cut volume",
+  !say("it took roughly 40 minutes").actions.some((a) => a.type === "setLoad"), say("it took roughly 40 minutes").intent);
+check("'I flattened my time by a minute' does not cut volume",
+  !say("I flattened my time by a minute").actions.some((a) => a.type === "setLoad"), say("I flattened my time by a minute").intent);
+check("'the route was straining but fine' is not an injury",
+  say("the route was straining but fine").intent !== "pain", say("the route was straining but fine").intent);
+check("'I tightened up my schedule' is not an injury",
+  say("I tightened up my schedule").intent !== "pain", say("I tightened up my schedule").intent);
+// Plurals were the reason prefix matching existed. They must keep working.
+check("Plural: 'replace pull-ups with dips' still works", say("replace pull-ups with dips").intent === "exerciseRules");
+check("Plural: 'swap squats for lunges' still works", say("swap squats for lunges").intent === "exerciseRules");
+check("Plural: 'remove burpees' still works", say("remove burpees from the circuit").intent === "exerciseRules");
+check("Plural: 'add two easy runs on Monday and Wednesday' still works", say("add two easy runs on Monday and Wednesday").intent === "addSession");
+check("Plural: 'I did 3 runs this week' is understood", say("I did 3 runs this week and felt good").intent !== "unknown");
+check("'skipping today' is still a missed session", say("skipping today, no time").intent === "missed", say("skipping today, no time").intent);
+check("A real affirmation still resumes a pending action",
+  withPend("yes, do it anyway").actions.some((a) => a.type === "moveSession"), withPend("yes, do it anyway").intent);
+check("A bare 'yes' still resumes it", withPend("yes").actions.some((a) => a.type === "moveSession"));
+
+section("Root cause #1 — windowed overrides must not reach into the past");
+// An override created today used to apply to every earlier week of the plan,
+// deleting the training history from view and collapsing past adherence.
+function oldPlanUser(co) {
+  const uu = mkUser({ schedule: { sessionsPerWeek: 5, minutesPerSession: 45, commitments: {} } });
+  uu.planStart = dateKey(addDays(monday, -70));
+  uu.coachOverrides = co;
+  for (let w = 1; w <= 9; w++) for (let i = 0; i < 5; i++)
+    uu.logs[dateKey(addDays(addDays(monday, -70), (w - 1) * 7 + i))] = { done: true, rpe: 5, targetRpe: 5, type: "easy" };
+  return uu;
+}
+const pastSessions = (pl) => pl.weeks.filter((w) => w.endDate < addDays(monday, -1)).flatMap((w) => w.days).filter((d) => d.session).length;
+const baselinePlan = buildPlan(oldPlanUser({}), computeAdaptation(oldPlanUser({})));
+const basePast = pastSessions(baselinePlan);
+check("Baseline has training in past weeks to protect", basePast > 20, String(basePast));
+
+const illNow = oldPlanUser({ illness: { level: "systemic", until: dateKey(addDays(monday, 5)), from: dateKey(monday) } });
+const illNowPlan = buildPlan(illNow, computeAdaptation(illNow));
+check("Systemic illness declared today leaves every past week untouched",
+  pastSessions(illNowPlan) === basePast, `${pastSessions(illNowPlan)} vs ${basePast}`);
+check("…and still clears this week", illNowPlan.weeks.find((w) => w.days.some((d) => d.dateKey === dateKey(monday))).days.every((d) => !d.session));
+check("…and leaves no orphaned extra session", !illNowPlan.weeks.flatMap((w) => w.days).some((d) => d.extraSession && !d.session));
+
+const illLegacy = oldPlanUser({ illness: { level: "systemic", until: dateKey(addDays(monday, 5)) } }); // no `from` stored
+check("A stored illness with no `from` also stays out of the past (safe default)",
+  pastSessions(buildPlan(illLegacy, computeAdaptation(illLegacy))) === basePast);
+
+const softNow = oldPlanUser({ softenUntil: dateKey(addDays(monday, 3)), softenFrom: dateKey(monday) });
+check("An injury window declared today rewrites no past session",
+  !buildPlan(softNow, computeAdaptation(softNow)).weeks.flatMap((w) => w.days).some((d) => d.session?.lowImpact && d.date < monday));
+const effNow = oldPlanUser({ effortOnly: { until: dateKey(addDays(monday, 3)), reason: "heat", from: dateKey(monday) } });
+check("An effort-only window declared today rewrites no past session",
+  !buildPlan(effNow, computeAdaptation(effNow)).weeks.flatMap((w) => w.days).some((d) => d.session?.effortOnly && d.date < monday));
+
+check("A week two months before an illness keeps its scheduled count",
+  sessionsScheduledForWeek(illNow, 7) === sessionsScheduledForWeek(oldPlanUser({}), 7),
+  `${sessionsScheduledForWeek(illNow, 7)} vs ${sessionsScheduledForWeek(oldPlanUser({}), 7)}`);
+check("Adherence never exceeds 1 with an illness on record",
+  computeAdaptation(illNow).adherence <= 1, String(computeAdaptation(illNow).adherence));
+check("Adherence with illness matches adherence without it (the illness is this week, the window is the past)",
+  Math.abs(computeAdaptation(illNow).adherence - computeAdaptation(oldPlanUser({})).adherence) < 1e-9,
+  `${computeAdaptation(illNow).adherence} vs ${computeAdaptation(oldPlanUser({})).adherence}`);
+
+// Deeper cause of adherence>1: buildPlan places sessions from the current
+// schedule while adherence read the historical count, so they disagreed for a
+// past week. A schedule that grew over time used to read above 100%.
+function grewSchedule() {
+  const uu = mkUser({ schedule: { sessionsPerWeek: 5, minutesPerSession: 45, commitments: {} } });
+  uu.planStart = dateKey(addDays(monday, -70));
+  uu.scheduleHistory = [{ fromWeek: 1, sessionsPerWeek: 3 }, { fromWeek: 9, sessionsPerWeek: 5 }];
+  const pl = buildPlan(uu, computeAdaptation(uu));
+  const cur = computeAdaptation(uu).currentWeek;
+  for (let w = Math.max(1, cur - 3); w < cur; w++) {
+    const wk = pl.weeks.find((x) => x.num === w);
+    if (wk) for (const d of wk.days) if (!d.isRest) uu.logs[d.dateKey] = { done: true, rpe: 5, targetRpe: 5, type: "easy" };
+  }
+  return uu;
+}
+check("A schedule that grew over time never reads above 100% adherence",
+  computeAdaptation(grewSchedule()).adherence <= 1, String(computeAdaptation(grewSchedule()).adherence));
+check("Adherence is always in [0,1] for any schedule history", (() => {
+  for (const hist of [[{ fromWeek: 1, sessionsPerWeek: 2 }, { fromWeek: 5, sessionsPerWeek: 6 }],
+                      [{ fromWeek: 1, sessionsPerWeek: 6 }, { fromWeek: 5, sessionsPerWeek: 2 }]]) {
+    const uu = mkUser(); uu.planStart = dateKey(addDays(monday, -56)); uu.scheduleHistory = hist;
+    const pl = buildPlan(uu, computeAdaptation(uu));
+    for (const wk of pl.weeks) for (const d of wk.days) if (!d.isRest) uu.logs[d.dateKey] = { done: true, rpe: 5, targetRpe: 5, type: "easy" };
+    const a = computeAdaptation(uu);
+    if (a.adherence < 0 || a.adherence > 1) return false;
+  }
+  return true;
+})());
+
+section("Root cause #3 — copy");
+check("No generated line says 'a easy'", (() => {
+  const uu = mkUser(); uu.planStart = dateKey(monday);
+  uu.coachOverrides = { races: [{ dateKey: dateKey(addDays(monday, 3)), meters: 5000, label: "parkrun" }], softenUntil: dateKey(addDays(monday, 6)), softenFrom: dateKey(monday) };
+  const pl = buildPlan(uu, computeAdaptation(uu));
+  return !pl.weeks.flatMap((w) => w.days).flatMap((d) => [d.session, d.extraSession]).filter(Boolean)
+    .flatMap((x) => x.lines).some((l) => /\ba easy\b/.test(l));
+})());
 
 section("Sample week output");
 u = mkUser(); a = computeAdaptation(u); plan = buildPlan(u, a);

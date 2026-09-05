@@ -2,7 +2,7 @@
 // Cache-busting: bump ?v= here and in index.html on every deploy that changes
 // app.js, plan-engine.js, workouts.js, or style.css.
 
-import { firebaseConfig } from "./firebase-config.js?v=39";
+import { firebaseConfig } from "./firebase-config.js?v=42";
 import {
   WORKOUT_FREQ, CARDIO_FREQ, RUN_DURATION, INJURY_FOCUS_LABELS,
   WEEKDAYS, WEEKDAYS_SHORT, COMMITMENT_LOADS, SESSION_COUNTS, SESSION_MINUTES,
@@ -11,9 +11,9 @@ import {
   formatDuration, formatPace, paceToMile, parseTimeToSeconds,
   buildPlan, getWeek, getDayForDate, computeAdaptation, goalAssessment,
   feasibilityReport, deriveFitness, pruneCoachOverrides,
-} from "./plan-engine.js?v=39";
-import { RPE_SCALE, GEAR_LABELS } from "./workouts.js?v=39";
-import { coachRespond } from "./coach.js?v=39";
+} from "./plan-engine.js?v=42";
+import { RPE_SCALE, GEAR_LABELS } from "./workouts.js?v=42";
+import { coachRespond } from "./coach.js?v=42";
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
@@ -1653,6 +1653,7 @@ async function applyCoachActions(actions) {
 
     else if (a.type === "softenDays") {
       co.softenUntil = dateKey(addDays(new Date(), a.days));
+      co.softenFrom = dateKey(new Date());
       co.softenReason = a.reason;
       touchedOverrides = true;
     }
@@ -1690,7 +1691,7 @@ async function applyCoachActions(actions) {
     }
 
     else if (a.type === "setIllness") {
-      co.illness = { level: a.level, until: a.until };
+      co.illness = { level: a.level, until: a.until, from: dateKey(new Date()) };
       touchedOverrides = true;
     }
 
@@ -1711,7 +1712,7 @@ async function applyCoachActions(actions) {
     }
 
     else if (a.type === "setEffortOnly") {
-      co.effortOnly = { until: a.until, reason: a.reason };
+      co.effortOnly = { until: a.until, reason: a.reason, from: dateKey(new Date()) };
       touchedOverrides = true;
     }
 
