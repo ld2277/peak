@@ -1,11 +1,9 @@
 # 100-persona × 100-day simulation — findings
 
-> **RESOLVED.** All three root causes fixed. A clean re-run of the full simulation
-> (100 personas × 100 days = 10,000 simulated days) now reports **0 errors, 0 distinct
-> kinds**. A fourth defect surfaced *during* the fixing — `buildPlan` and adherence scoring
-> disagreed on a past week's session count, pushing adherence above 100% — and is fixed too.
-> Regression tests for all four are in `test.html` (405 checks). Details below are kept as
-> the record of what was found.
+> **RESOLVED.** Five root causes found and fixed across three simulation passes. The largest
+> clean re-run is **250 personas × 250 days = 62,500 simulated days, 0 errors, 0 distinct
+> kinds**. Regression tests for all five are in `test.html` (411 checks). Details below are
+> the record of what was found, in the order found.
 
 ## Method
 
@@ -217,3 +215,44 @@ produces a nonsensical figure, and adherence is only ever used against coarse th
 
 Re-run: **0 errors / 10,000 days.** Full suite: **405 engine checks**, plus 37+35+26 probe
 phrasings, the interaction audit and the stress suite, all green.
+
+
+---
+
+## Root cause #5 — race taper did not cross week boundaries (found by scaling up)
+
+Running the simulation larger — 250+ days per persona, start dates staggered up to 340 days
+back, so many more races fall on Mondays and Sundays — surfaced a defect that never appeared
+at 100×100: **445 hits at 60 personas × 300 days**, one single kind.
+
+`applyCoachOverrides` runs once per week over that week's 7 `dayEntries`, and its `byKey`
+map holds only those 7 days. The race taper looked up the day before and after via `byKey`,
+so:
+
+- a race on a **Monday** — whose rest day is the **previous week's Sunday** — left that
+  Sunday untrained-hard before a race;
+- a race on a **Sunday** — whose recovery day is the **next week's Monday** — left a hard
+  session standing the day after.
+
+Both were invisible to the per-week map. Races land on those weekdays often enough over a
+long horizon that this recurred hundreds of times; it simply never arose in the original
+seed, where the pass-2 invariant that catches it existed but "was not exercised".
+
+**Fix:** the race session is still placed per-week (the race day is inside its own week), but
+the neighbour taper moved to a plan-wide pass (`protectRaceNeighbours`) that runs after every
+week is built, over one flat map of all days, so it sees across boundaries. Both directions
+are now covered, and a regression test checks race offsets 6–20.
+
+## Resolution summary
+
+| # | Defect | Found at | Fix |
+|---|---|---|---|
+| 1 | Windowed overrides had no lower bound → reached into plan history | 100×100 | `from` on each; both ends tested; `extraSession` cleared with `session` |
+| 2 | Keyword matching had no trailing boundary → matched prefixes | 100×100 census | exact fast-path requires end-of-token or a bare plural |
+| 3 | "a easy run" in engine copy | 100×100 census | "an easy run" |
+| 4 | buildPlan vs adherence disagreed on past week counts → >100% | while fixing | numerator capped at scheduled; aggregate clamped to [0,1] |
+| 5 | Race taper did not cross week boundaries | 60×300 | neighbour taper moved to a plan-wide pass |
+
+Largest clean re-run: **250 × 250 = 62,500 days, 0 errors.** Full suite: **411 engine
+checks**, plus 37/35/26 probe phrasings, the interaction audit and the stress suite, all
+green. `simulate.html` now takes `?personas=` and `?days=` so the scale is a URL parameter.

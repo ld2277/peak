@@ -5,7 +5,7 @@
 import {
   WARMUPS, COOLDOWNS, strengthBlock, conditioningBlock, prehabBlock,
   MOBILITY_FLOW, INJURY_FOCUS_LABELS,
-} from "./workouts.js?v=42";
+} from "./workouts.js?v=44";
 
 export { INJURY_FOCUS_LABELS };
 
@@ -527,6 +527,29 @@ function buildSession({ type, minutes, tier, phase, weekNum, weekInPhase, paces,
 
 const RUN_TYPES = new Set(["easy", "strides", "intervals", "tempo", "long", "test"]);
 
+// Clears the day before every race (rest before racing) and the day after when
+// it holds a hard session (recovery after). Runs over the whole plan's days so
+// it works across week boundaries — the per-week pass could not, which left a
+// Monday race's preceding Sunday, and a Sunday race's following Monday,
+// unprotected.
+function protectRaceNeighbours(allDays, races) {
+  if (!races || !races.length) return;
+  const byKey = Object.fromEntries(allDays.map((d) => [d.dateKey, d]));
+  for (const race of races) {
+    const d = byKey[race.dateKey];
+    if (!d || !d.session || !d.session.isRace) continue;
+    const before = byKey[dateKey(addDays(d.date, -1))];
+    if (before && before.session && !before.session.isRace) {
+      before.session = null; before.extraSession = null; before.isRest = true; before.raceTaper = "before";
+    }
+    const after = byKey[dateKey(addDays(d.date, 1))];
+    if (after && after.session && !after.session.isRace &&
+        ["intervals", "tempo", "long", "test"].includes(after.session.type)) {
+      after.session = null; after.extraSession = null; after.isRest = true; after.raceTaper = "after";
+    }
+  }
+}
+
 // Start of a windowed override. Overrides created before `from` existed have
 // none stored; treating them as starting this week stops them reaching into
 // the past, which is the whole point.
@@ -645,17 +668,10 @@ function applyCoachOverrides(dayEntries, user, makeSession, weekNum) {
     };
     d.isRest = false;
     d.extraSession = null; // nothing else goes on a race day
-
-    // Protect the day before and the day after.
-    const before = byKey[dateKey(addDays(d.date, -1))];
-    if (before && before.session && !before.session.isRace) {
-      before.session = null; before.extraSession = null; before.isRest = true; before.raceTaper = "before";
-    }
-    const after = byKey[dateKey(addDays(d.date, 1))];
-    if (after && after.session && !after.session.isRace &&
-        ["intervals", "tempo", "long", "test"].includes(after.session.type)) {
-      after.session = null; after.extraSession = null; after.isRest = true; after.raceTaper = "after";
-    }
+    // The day-before and day-after taper is applied plan-wide after every week
+    // is built (see protectRaceNeighbours). Doing it here missed a race on a
+    // Monday (its rest day is the previous week's Sunday) or a Sunday (its
+    // recovery day is the next week's Monday) — byKey only holds this week.
   }
 
   // 3d. Conditions where pace targets are meaningless — run to effort instead.
@@ -902,6 +918,9 @@ export function buildPlan(user, adaptation) {
       focus: weekFocus({ phase, isDeload, isTest, isTaper, isGoalWeek: w === totalWeeks, goal }),
     });
   }
+
+  // Race taper across week boundaries, now that every day exists.
+  protectRaceNeighbours(weeks.flatMap((w) => w.days), user.coachOverrides?.races || []);
 
   return {
     planStart,
