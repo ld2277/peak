@@ -5,7 +5,7 @@
 import {
   WARMUPS, COOLDOWNS, strengthBlock, conditioningBlock, prehabBlock,
   MOBILITY_FLOW, INJURY_FOCUS_LABELS,
-} from "./workouts.js?v=45";
+} from "./workouts.js?v=46";
 
 export { INJURY_FOCUS_LABELS };
 

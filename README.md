@@ -17,7 +17,7 @@ storage. No build step, no framework, no npm.
    comfortably, your 5K time (optional), and any muscle groups you want to keep injury-free.
 2. **The time you actually have** — sessions per week, minutes per session, and a
    day-by-day map of existing commitments (soccer Tuesday and Thursday evenings, say).
-3. **What you're chasing** — a running time/distance goal or general fitness, plus a deadline.
+3. **What you're chasing** — a running time/distance goal or general fitness, plus a start date (defaults to today; pick a future date to begin later) and a deadline.
 
 Before anything is built, the goal is checked against your starting point, your schedule,
 and the calendar. If it doesn't add up you're told why, with a concrete alternative, and
@@ -486,5 +486,5 @@ targets) lives in `plan-engine.js`.
 ## Cache-busting
 
 `index.html`, `app.js`, `plan-engine.js`, and `coach.js` carry `?v=` on their imports —
-currently `v=45`.
+currently `v=46`.
 Bump them on every deploy that touches CSS or JS, or phones will serve stale copies for days.

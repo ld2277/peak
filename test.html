@@ -31,8 +31,8 @@ import {
   feasibilityReport, achievableVdotGain, EVENT_REQUIREMENTS,
   deriveFitness, sessionsScheduledForWeek, baselineVdot, parseDateKey,
   pruneCoachOverrides,
-} from "./plan-engine.js?v=45";
-import { coachRespond } from "./coach.js?v=45";
+} from "./plan-engine.js?v=46";
+import { coachRespond } from "./coach.js?v=46";
 
 const out = document.getElementById("out");
 let pass = 0, fail = 0;
@@ -1537,6 +1537,41 @@ check("No race ever leaves the day before it with a non-race session", (() => {
 })());
 check("The race session itself survives the plan-wide pass",
   dayFor(planWithRaceOn(9).plan, addDays(monday, 9)).session?.isRace);
+
+section("Chosen plan start date");
+// The start date is picked at onboarding and drives every week boundary.
+function planStartingOn(startKey, deadlineKey) {
+  const uu = mkUser({ goal: { type: "endurance", event: "tenK", targetSeconds: null, deadline: deadlineKey } });
+  uu.planStart = startKey;
+  return buildPlan(uu, computeAdaptation(uu));
+}
+// A start today.
+const todayStart = planStartingOn(dateKey(monday), dateKey(addDays(monday, 84)));
+check("Week 1 begins on the start's Monday",
+  todayStart.weeks[0].days[0].dateKey === dateKey(monday), todayStart.weeks[0].days[0].dateKey);
+check("Total weeks span start → deadline", todayStart.totalWeeks >= 12 && todayStart.totalWeeks <= 13, String(todayStart.totalWeeks));
+
+// A future start: the plan is anchored forward, deadline measured from it.
+const future = addDays(monday, 28);
+const futureStart = planStartingOn(dateKey(future), dateKey(addDays(future, 70)));
+check("A future start anchors week 1 to the future Monday",
+  futureStart.weeks[0].days[0].dateKey === dateKey(mondayOnOrBefore(future)), futureStart.weeks[0].days[0].dateKey);
+check("A future-start plan still has a sane week count", futureStart.totalWeeks >= 10 && futureStart.totalWeeks <= 11, String(futureStart.totalWeeks));
+check("A future-start plan builds coherent days",
+  futureStart.weeks.every((w) => w.days.length === 7 && w.days.every((d) => d.isRest ? !d.session : (d.session && d.session.minutes > 0))));
+
+// A non-Monday start snaps back to its Monday consistently.
+const wed = addDays(monday, 2);
+const snapped = planStartingOn(dateKey(wed), dateKey(addDays(wed, 84)));
+check("A mid-week start snaps to the Monday on or before it",
+  snapped.planStart.getTime() === mondayOnOrBefore(wed).getTime());
+
+// Fitness derivation and adaptation don't choke on a future start (currentWeek <= 0).
+check("A future start doesn't break adaptation", (() => {
+  const uu = mkUser(); uu.planStart = dateKey(addDays(monday, 21));
+  const a = computeAdaptation(uu);
+  return isFinite(a.volumeFactor) && a.fitness && isFinite(a.fitness.vdot);
+})());
 
 section("Sample week output");
 u = mkUser(); a = computeAdaptation(u); plan = buildPlan(u, a);

@@ -2,7 +2,7 @@
 // Cache-busting: bump ?v= here and in index.html on every deploy that changes
 // app.js, plan-engine.js, workouts.js, or style.css.
 
-import { firebaseConfig } from "./firebase-config.js?v=45";
+import { firebaseConfig } from "./firebase-config.js?v=46";
 import {
   WORKOUT_FREQ, CARDIO_FREQ, RUN_DURATION, INJURY_FOCUS_LABELS,
   WEEKDAYS, WEEKDAYS_SHORT, COMMITMENT_LOADS, SESSION_COUNTS, SESSION_MINUTES,
@@ -11,9 +11,9 @@ import {
   formatDuration, formatPace, paceToMile, parseTimeToSeconds,
   buildPlan, getWeek, getDayForDate, computeAdaptation, goalAssessment,
   feasibilityReport, pruneCoachOverrides,
-} from "./plan-engine.js?v=45";
-import { RPE_SCALE, GEAR_LABELS } from "./workouts.js?v=45";
-import { coachRespond } from "./coach.js?v=45";
+} from "./plan-engine.js?v=46";
+import { RPE_SCALE, GEAR_LABELS } from "./workouts.js?v=46";
+import { coachRespond } from "./coach.js?v=46";
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
@@ -545,6 +545,10 @@ function renderOnboarding() {
           <select id="f-fitnesstarget">${optionsHtml(FITNESS_TARGETS)}</select>
         </div>
 
+        <label for="f-start">Start date</label>
+        <input type="date" id="f-start" required />
+        <p class="hint">When the plan begins. Defaults to today; pick a future date if you're starting later (each week runs Monday to Sunday). This can't be changed once the plan is built.</p>
+
         <label for="f-deadline">Deadline</label>
         <input type="date" id="f-deadline" required />
         <p class="hint">The date you want to be ready by. The plan works backwards from it.</p>
@@ -562,7 +566,9 @@ function renderOnboarding() {
 
   `;
 
-  // Default deadline: 12 weeks out.
+  // Default start = today, deadline = 12 weeks out.
+  const sd = $("#f-start");
+  if (sd && !sd.value) sd.value = dateKey(new Date());
   const dl = $("#f-deadline");
   if (dl && !dl.value) dl.value = dateKey(addDays(new Date(), 84));
 
@@ -636,11 +642,20 @@ async function handleOnboardSubmit(e) {
   const err = $("#onboard-error");
   err.classList.add("hidden");
 
+  const startStr = draft["f-start"] || dateKey(new Date());
   const deadline = draft["f-deadline"];
   if (!deadline) return showErr("Pick a deadline.");
-  const weeksOut = Math.ceil((parseDateKey(deadline) - mondayOnOrBefore(new Date())) / (7 * 86400000));
-  if (weeksOut < 2) return showErr("That deadline is less than two weeks away — too short to build a plan around. Push it out a bit.");
-  if (weeksOut > 52) return showErr("That deadline is more than a year out. Pick something within 12 months and set a new goal when you get there.");
+
+  // A start far in the past would back-date the whole plan; a year out is a
+  // reminder, not a plan. Both ends bounded. Weeks are measured from the start.
+  const startWeek = mondayOnOrBefore(parseDateKey(startStr));
+  const daysFromToday = Math.round((parseDateKey(startStr) - mondayOnOrBefore(new Date())) / 86400000);
+  if (daysFromToday < -14) return showErr("That start date is more than two weeks ago. Pick today, or a date going forward.");
+  if (daysFromToday > 365) return showErr("That start date is more than a year away. Pick something within the next 12 months.");
+
+  const weeksOut = Math.ceil((parseDateKey(deadline) - startWeek) / (7 * 86400000));
+  if (weeksOut < 2) return showErr("Your deadline is less than two weeks after the start — too short to build a plan around. Move the deadline out, or the start date up.");
+  if (weeksOut > 52) return showErr("That's more than a year of plan. Pick a deadline within 12 months of the start and set a new goal when you get there.");
 
   const fiveK = parseTimeToSeconds(draft["f-5k"]);
   if (draft["f-5k"] && !fiveK) return showErr("Couldn't read that 5K time. Use mm:ss, like 24:30.");
@@ -663,7 +678,7 @@ async function handleOnboardSubmit(e) {
 
   const candidate = {
     name: draft["f-name"].trim().slice(0, 60),
-    planStart: dateKey(new Date()),
+    planStart: startStr,
     profile: {
       workoutsPerWeek: draft["f-workouts"] || "none",
       cardioPerWeek: draft["f-cardio"] || "none",
@@ -1161,7 +1176,7 @@ function renderProfile() {
   c.innerHTML = `
     <div class="card">
       <h2>${escapeHtml(user.name)}</h2>
-      <p class="muted" style="margin-top:-4px;">Week ${Math.min(adaptation.currentWeek, plan.totalWeeks)} of ${plan.totalWeeks} · ${plan.tier} starting point</p>
+      <p class="muted" style="margin-top:-4px;">${plan.planStart > new Date() ? `Starts ${plan.planStart.toLocaleDateString(undefined, { month: "short", day: "numeric" })}` : `Week ${Math.min(Math.max(1, adaptation.currentWeek), plan.totalWeeks)} of ${plan.totalWeeks}`} · ${plan.tier} starting point</p>
       <div class="stat-row">
         <div class="stat"><span class="stat-num">${Object.values(user.logs || {}).filter((l) => l.done).length}</span><span class="stat-label">sessions logged</span></div>
         <div class="stat"><span class="stat-num">${adherencePct}%</span><span class="stat-label">recent adherence</span></div>
@@ -1189,8 +1204,9 @@ function renderProfile() {
       <table class="profile-table">
         <tr><td>Goal</td><td>${escapeHtml(g.type === "endurance" ? EVENTS[g.event].label : FITNESS_TARGETS[g.fitnessTarget || "allround"].label)}</td></tr>
         ${g.type === "endurance" ? `<tr><td>Target time</td><td>${g.targetSeconds ? formatDuration(g.targetSeconds) : "just finish it"}</td></tr>` : ""}
+        <tr><td>Start</td><td>${plan.planStart.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" })}</td></tr>
         <tr><td>Deadline</td><td>${plan.deadline.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" })}</td></tr>
-        <tr><td>Weeks left</td><td>${Math.max(0, plan.totalWeeks - adaptation.currentWeek + 1)}</td></tr>
+        <tr><td>Weeks left</td><td>${Math.min(plan.totalWeeks, Math.max(0, plan.totalWeeks - adaptation.currentWeek + 1))}</td></tr>
       </table>
     </div>
 

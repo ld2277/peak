@@ -12,7 +12,7 @@
 import {
   dateKey, parseDateKey, addDays, weekdayIndex, WEEKDAYS,
   formatDuration, formatPace, INJURY_FOCUS_LABELS, vdotFromRace,
-} from "./plan-engine.js?v=45";
+} from "./plan-engine.js?v=46";
 
 // ---------------------------------------------------------------- text utils
 
