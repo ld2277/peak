@@ -10,9 +10,9 @@
 // is what makes the whole thing testable.
 
 import {
-  dateKey, parseDateKey, addDays, weekdayIndex, WEEKDAYS, WEEKDAYS_SHORT,
+  dateKey, parseDateKey, addDays, weekdayIndex, WEEKDAYS,
   formatDuration, formatPace, INJURY_FOCUS_LABELS, vdotFromRace,
-} from "./plan-engine.js?v=44";
+} from "./plan-engine.js?v=45";
 
 // ---------------------------------------------------------------- text utils
 

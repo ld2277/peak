@@ -6,8 +6,8 @@ td{padding:3px 12px 3px 0;vertical-align:top;border-bottom:1px solid #222}</styl
 <script>window.addEventListener("error",e=>{document.getElementById("out").innerHTML=`<div class="bad">CRASH: ${e.message}</div>`});</script>
 <script type="module">
 import { buildPlan, computeAdaptation, deriveFitness, pruneCoachOverrides, goalAssessment,
-         feasibilityReport, vdotFromRace, dateKey, addDays, mondayOnOrBefore } from "./plan-engine.js?v=44";
-import { coachRespond } from "./coach.js?v=44";
+         feasibilityReport, vdotFromRace, dateKey, addDays, mondayOnOrBefore } from "./plan-engine.js?v=45";
+import { coachRespond } from "./coach.js?v=45";
 
 // Deterministic PRNG so any failure is reproducible from its persona id.
 function rng(seed){let s=seed>>>0;return()=>{s=(s*1664525+1013904223)>>>0;return s/4294967296;};}

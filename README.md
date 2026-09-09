@@ -486,5 +486,5 @@ targets) lives in `plan-engine.js`.
 ## Cache-busting
 
 `index.html`, `app.js`, `plan-engine.js`, and `coach.js` carry `?v=` on their imports —
-currently `v=39`.
+currently `v=45`.
 Bump them on every deploy that touches CSS or JS, or phones will serve stale copies for days.
